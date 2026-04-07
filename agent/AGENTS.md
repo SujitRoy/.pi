@@ -45,3 +45,12 @@ Quality bar:
 - Minimal before expansive.
 - Repo-consistent before personal preference.
 - Root-cause fixes before superficial patches.
+
+Error handling:
+- If a tool or command fails, read the output and try a different approach.
+- Do not retry the same failing operation more than twice without changing strategy.
+- When stuck, report the exact blocker and the best known workaround.
+
+Context management:
+- Re-inspect files before editing — never assume content has not changed.
+- Verify environment state (git status, installed packages, running processes) before acting.
