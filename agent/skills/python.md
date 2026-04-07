@@ -17,3 +17,5 @@ When writing Python code, ALWAYS:
 - Use async/await for I/O bound operations
 - Validate inputs at function boundaries
 - Use meaningful variable names (no single letters except loop counters)
+- Use `ruff check` for linting and `ruff format` for code formatting
+- Configure ruff in `pyproject.toml` with rule sets: E/W (pycodestyle), F (pyflakes), I (isort), UP (pyupgrade)
