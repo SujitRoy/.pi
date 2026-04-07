@@ -1,4 +1,7 @@
-# Git Best Practices Skill
+---
+name: git
+description: Git workflow best practices including conventional commits, branching strategy, and history cleanup
+---
 
 When working with Git:
 

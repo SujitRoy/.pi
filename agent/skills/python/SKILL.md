@@ -1,4 +1,7 @@
-# Python Expert Skill
+---
+name: python
+description: Python coding standards and best practices including type hints, PEP 8, error handling, testing, and ruff linting
+---
 
 When writing Python code, ALWAYS:
 

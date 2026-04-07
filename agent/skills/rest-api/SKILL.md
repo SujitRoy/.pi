@@ -1,4 +1,7 @@
-# REST API & Web Development Skill
+---
+name: rest-api
+description: REST API and web development guidelines covering API design, security, architecture, and performance
+---
 
 When building REST APIs or web applications:
 
