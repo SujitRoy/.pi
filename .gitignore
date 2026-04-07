@@ -1,5 +1,6 @@
 # Authentication and secrets
 agent/auth.json
+agent/models.json
 *.env
 *.key
 *.pem
