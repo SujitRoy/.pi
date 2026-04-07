@@ -1,21 +1,23 @@
 # PI Agent Configuration
 
-Personal configuration for the [PI Coding Agent](https://github.com/badlogic/pi-mono), a terminal-based AI coding assistant.
-
-This repository contains skills, model configurations, and coding standards used across my development environments.
+Personal skills, model configurations, and coding standards for the [PI Coding Agent](https://github.com/badlogic/pi-mono), a terminal-based AI coding assistant.
 
 ## Structure
 
 ```
 .pi/
 ├── agent/
-│   ├── models.json       Provider and model definitions
+│   ├── models.json       Provider and model definitions (gitignored)
 │   ├── settings.json     Default model and thinking level
 │   ├── AGENTS.md         Coding standards and behavior rules
 │   ├── skills/           High-performance skill modules
 │   ├── auth.json         Authentication tokens (gitignored)
 │   ├── sessions/         Conversation history (gitignored)
 │   └── bin/              Downloaded tools (gitignored)
+├── scripts/
+│   ├── patch-agentrouter.ps1   Windows patch for AgentRouter
+│   ├── patch-agentrouter.sh    Linux/macOS patch for AgentRouter
+│   └── README.md               Patch documentation
 ├── .gitignore
 └── README.md
 ```
@@ -24,15 +26,16 @@ This repository contains skills, model configurations, and coding standards used
 
 Files in this repository define how the PI agent behaves:
 
-- **models.json** - API provider endpoints, model specifications, and context window settings
-- **settings.json** - Default model selection and thinking level
+- **settings.json** - Default model and thinking level
 - **AGENTS.md** - Global instructions for code quality, architecture, and communication
-- **skills/** - Domain-specific coding skill modules following the Agent Skills spec
+- **skills/** - 17 domain-specific skill modules following the Agent Skills spec
+- **scripts/** - Reusable patch scripts for known provider issues
 
 ## What Is Not Tracked
 
 The following are excluded via `.gitignore` because they contain personal data or are machine-specific:
 
+- **models.json** - API provider endpoints, keys, and model specifications
 - **auth.json** - OAuth tokens and API credentials
 - **sessions/** - Full conversation history with the agent
 - **bin/** - Downloaded binary tools (fd, rg, etc.)
@@ -45,26 +48,21 @@ Clone this repository to your home directory:
 git clone https://github.com/SujitRoy/.pi.git ~/.pi
 ```
 
-Then configure your own provider in `agent/models.json` and authenticate PI:
+Then configure your own providers in `agent/models.json` (create it if it does not exist) and authenticate PI:
 
 ```bash
 pi /login
 ```
 
-## Models
-
-The current configuration defines a custom provider (`sujitroy`) with the following models:
-
-| Model ID | Description | Context | Reasoning |
-|----------|-------------|---------|-----------|
-| qwen3-coder-plus | Balanced coding model | 128K | Yes |
-| qwen3-coder-flash | Fast model for simple tasks | 128K | No |
-| coder-model | Deep reasoning model | 256K | Yes |
-| qwen3.5-plus | Alias for coder-model | 256K | Yes |
+Each provider in `models.json` needs:
+- `baseUrl` - API endpoint
+- `apiKey` - Your API token
+- `api` - Provider type (usually `openai-completions`)
+- `models` - Array of available models with context, reasoning, and token settings
 
 ## Skills
 
-Seven high-performance skill modules are included, optimized for minimal token usage and strong agentic behavior:
+17 high-performance skill modules are included, optimized for minimal token usage and strong agentic behavior:
 
 | Skill | Purpose |
 |-------|---------|
@@ -75,6 +73,16 @@ Seven high-performance skill modules are included, optimized for minimal token u
 | **test** | Add and improve tests matching existing framework and style |
 | **plan** | Create short outcome-oriented plans for complex, ambiguous, or risky tasks |
 | **refactor** | Improve code structure without changing intended behavior |
+| **security** | Vulnerability identification, secure patterns, OWASP validation |
+| **documentation** | Clear, concise, accurate technical documentation with examples |
+| **performance** | Profile, identify bottlenecks, optimize, measure, and validate |
+| **git** | Conventional commits, feature branches, clean history, semantic versioning |
+| **infrastructure** | Docker, CI/CD, cloud deployment, infrastructure-as-code |
+| **data** | Database design, migrations, queries, and data integrity |
+| **api** | REST API design, contracts, versioning, and endpoint conventions |
+| **architecture** | System design, patterns, boundaries, and structural decisions |
+| **observability** | Logging, metrics, tracing, and alerting for production systems |
+| **frontend** | UI development, accessibility, responsiveness, and client-side best practices |
 
 ## Skill Format
 
@@ -114,6 +122,25 @@ When working with Docker:
 - ...
 ```
 
+## Known Issues
+
+### AgentRouter 401 Error
+
+AgentRouter rejects requests from unknown clients. PI's OpenAI SDK sends unrecognized `X-Stainless-*` headers.
+
+**Fix:** Run the patch script after (re)installing PI:
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -File scripts/patch-agentrouter.ps1
+
+# Linux/macOS
+chmod +x scripts/patch-agentrouter.sh
+./patch-agentrouter.sh
+```
+
+See `scripts/README.md` for full details and restore instructions.
+
 ## Syncing Across Machines
 
 Push changes:
@@ -132,7 +159,7 @@ cd ~/.pi
 git pull
 ```
 
-Re-authenticate on the new machine since `auth.json` is not tracked.
+Re-configure `agent/models.json` and re-authenticate on the new machine since those files are not tracked.
 
 ## License
 
