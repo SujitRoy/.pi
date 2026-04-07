@@ -10,8 +10,15 @@ PI's OpenAI provider sends default `X-Stainless-*` headers that AgentRouter does
 
 ## How to Run
 
+### Windows (PowerShell)
 ```powershell
 powershell -ExecutionPolicy Bypass -File patch-agentrouter.ps1
+```
+
+### Linux / macOS (Bash)
+```bash
+chmod +x patch-agentrouter.sh
+./patch-agentrouter.sh
 ```
 
 ## What It Does
@@ -33,9 +40,16 @@ powershell -ExecutionPolicy Bypass -File patch-agentrouter.ps1
 
 ## Restore Original
 
+### Windows
 ```powershell
 $PI = "$env:APPDATA\npm\node_modules\@mariozechner\pi-coding-agent\node_modules\@mariozechner\pi-ai\dist\providers"
 Copy-Item "$PI\openai-completions.js.bak" "$PI\openai-completions.js" -Force
+```
+
+### Linux / macOS
+```bash
+PI="$(npm root -g)/@mariozechner/pi-coding-agent/node_modules/@mariozechner/pi-ai/dist/providers"
+cp "$PI/openai-completions.js.bak" "$PI/openai-completions.js"
 ```
 
 ## Reference
