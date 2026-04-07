@@ -122,25 +122,6 @@ When working with Docker:
 - ...
 ```
 
-## Known Issues
-
-### AgentRouter 401 Error
-
-AgentRouter rejects requests from unknown clients. PI's OpenAI SDK sends unrecognized `X-Stainless-*` headers.
-
-**Fix:** Run the patch script after (re)installing PI:
-
-```powershell
-# Windows
-powershell -ExecutionPolicy Bypass -File scripts/patch-agentrouter.ps1
-
-# Linux/macOS
-chmod +x scripts/patch-agentrouter.sh
-./patch-agentrouter.sh
-```
-
-See `scripts/README.md` for full details and restore instructions.
-
 ## Syncing Across Machines
 
 Push changes:
