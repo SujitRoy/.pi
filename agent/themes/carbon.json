@@ -1,0 +1,77 @@
+{
+  "$schema": "https://raw.githubusercontent.com/badlogic/pi-mono/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+  "name": "carbon",
+  "vars": {
+    "accent": "#4fc3f7",
+    "green": "#4caf50",
+    "red": "#f44336",
+    "amber": "#ffab40",
+    "gray": 248,
+    "grayDim": 240,
+    "grayBorder": 235
+  },
+  "colors": {
+    "accent": "accent",
+    "border": "grayBorder",
+    "borderAccent": "accent",
+    "borderMuted": 233,
+    "success": "green",
+    "error": "red",
+    "warning": "amber",
+    "muted": "gray",
+    "dim": "grayDim",
+    "text": "",
+    "thinkingText": "gray",
+
+    "selectedBg": "#0d0d0d",
+    "userMessageBg": "#080808",
+    "userMessageText": "",
+    "customMessageBg": "#080808",
+    "customMessageText": "",
+    "customMessageLabel": "accent",
+    "toolPendingBg": "#050505",
+    "toolSuccessBg": "#050a05",
+    "toolErrorBg": "#0a0505",
+    "toolTitle": "accent",
+    "toolOutput": "",
+
+    "mdHeading": "accent",
+    "mdLink": "accent",
+    "mdLinkUrl": "gray",
+    "mdCode": "#e0e0e0",
+    "mdCodeBlock": "",
+    "mdCodeBlockBorder": "grayDim",
+    "mdQuote": "gray",
+    "mdQuoteBorder": "grayDim",
+    "mdHr": "grayDim",
+    "mdListBullet": "accent",
+
+    "toolDiffAdded": "green",
+    "toolDiffRemoved": "red",
+    "toolDiffContext": "gray",
+
+    "syntaxComment": "gray",
+    "syntaxKeyword": "#c792ea",
+    "syntaxFunction": "#82aaff",
+    "syntaxVariable": "#e0e0e0",
+    "syntaxString": "#c3e88d",
+    "syntaxNumber": "#f78c6c",
+    "syntaxType": "#82aaff",
+    "syntaxOperator": "#89ddff",
+    "syntaxPunctuation": "gray",
+
+    "thinkingOff": "grayDim",
+    "thinkingMinimal": "gray",
+    "thinkingLow": "accent",
+    "thinkingMedium": "#80deea",
+    "thinkingHigh": "amber",
+    "thinkingXhigh": "red",
+
+    "bashMode": "amber"
+  },
+  "export": {
+    "pageBg": "#000000",
+    "cardBg": "#0a0a0a",
+    "infoBg": "#0a0a05"
+  }
+}
