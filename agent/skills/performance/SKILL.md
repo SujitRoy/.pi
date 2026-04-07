@@ -1,13 +1,12 @@
 ---
 name: performance
-description: Optimize application performance, scalability, and resource efficiency
+description: Profile, identify bottlenecks, optimize, measure, and validate improvements
 ---
 
-Use when improving performance characteristics.
-
-- Profile and identify performance bottlenecks.
-- Optimize algorithms, data structures, and resource usage.
-- Consider caching, concurrency, and scalability.
-- Measure and validate performance improvements.
-- Balance performance gains with code complexity and maintainability.
-- Avoid premature optimization — profile first, optimize second.
+- Profile first — never optimize based on assumptions.
+- Fix algorithmic complexity before micro-optimizing.
+- Use caching strategically — invalidation is harder than insertion.
+- Measure and validate every improvement with real data.
+- Balance performance gains against complexity and maintainability.
+- Watch for N+1 queries, unbounded loops, and synchronous I/O in hot paths.
+- Optimize the 20% of code that costs 80% of the time.

@@ -1,18 +1,15 @@
 ---
 name: review
-description: Code review focused on correctness, security, performance, maintainability, and tests
+description: Code review focused on correctness, security, performance, maintainability, tests
 ---
 
-Use for code review, audit, or quality improvement tasks.
+Review in this order — stop at the first blocker:
+1. Correctness — does it work as intended?
+2. Security — can it be exploited?
+3. Performance — will it scale?
+4. Maintainability — can someone else read and change it?
+5. Tests — are edge cases and failures covered?
 
-Review in this order:
-1. Correctness
-2. Security
-3. Performance
-4. Maintainability
-5. Tests
-
-- Focus on high-impact issues first.
-- Be concrete and actionable.
-- Prefer minimal, practical fixes.
-- Avoid low-value style comments unless they affect clarity, safety, or consistency.
+- Focus on high-impact issues first. Be concrete and actionable.
+- Avoid low-value style comments unless they affect clarity or safety.
+- If it works but is fragile, say so with specifics.

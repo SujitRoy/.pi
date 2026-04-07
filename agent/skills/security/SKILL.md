@@ -1,15 +1,13 @@
 ---
 name: security
-description: Identify and address security vulnerabilities, best practices, and compliance requirements
+description: Identify vulnerabilities, enforce authentication, and validate secure patterns
 ---
 
-Use when assessing or improving security posture.
-
-- Follow security-first development principles.
-- Identify common vulnerabilities (XSS, injection, auth bypass, data exposure).
-- Recommend secure coding practices and patterns.
-- Consider data protection, encryption, and access control.
-- Validate against OWASP Top 10 and security standards.
-- Never hardcode secrets, keys, or credentials — use environment variables.
-- Sanitize and validate all external inputs.
-- Balance security with usability and performance.
+- Never hardcode secrets, keys, tokens, or credentials.
+- Sanitize and validate ALL external inputs — trust nothing.
+- Enforce authentication and authorization on every protected endpoint.
+- Use parameterized queries — never string-concat SQL or commands.
+- Apply principle of least privilege for every access decision.
+- Validate against OWASP Top 10 for web-facing code.
+- Fail closed — deny by default, allow by explicit exception.
+- Flag any data exposure in logs, error messages, or URLs.
