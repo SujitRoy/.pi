@@ -10,3 +10,8 @@ description: Add and improve tests matching existing framework and style
 - Keep tests focused, readable, and deterministic.
 - No flaky tests — if it fails intermittently, fix it immediately.
 - Run tests before claiming verification.
+- Contract testing: verify API contracts between services, test backward compatibility.
+- Performance testing: load test with realistic traffic, measure 95th/99th percentile response times.
+- Establish performance baselines — alert on degradation.
+- Chaos engineering: test failure scenarios in staging, verify circuit breakers and fallbacks.
+- Document failure modes and recovery procedures.

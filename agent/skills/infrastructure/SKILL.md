@@ -11,3 +11,10 @@ description: Docker, CI/CD, cloud deployment, and infrastructure-as-code best pr
 - Health checks on every service — no silent failures.
 - Pin dependency versions — no floating tags in production.
 - Secrets via vault or env injection, never in Dockerfiles or repos.
+- Right-size instances based on utilization — use spot instances for stateless workloads.
+- Tag resources for cost allocation and reporting.
+- Define RTO (Recovery Time Objective) and RPO (Recovery Point Objective).
+- Regular disaster recovery drills and backup verification through restore tests.
+- Monitor resource utilization (CPU, memory, disk, network) — alert on capacity thresholds.
+- Implement predictive scaling based on historical patterns.
+- Track cost trends and anomalies — optimize continuously.
