@@ -12,3 +12,4 @@ Use when writing or editing code.
 - Do not leave placeholders unless explicitly requested.
 - Consider edge cases, integration impact, and backward compatibility.
 - Keep code runnable and production-ready.
+- Use available tools (read, write, edit, bash) to inspect and verify changes.
