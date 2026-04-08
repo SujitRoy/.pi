@@ -4,6 +4,7 @@ description: Logging, metrics, tracing, and alerting for production systems
 ---
 
 - Structured logging only (JSON) — no free-form text in production logs.
+- Python: Use logging.config.dictConfig for structured logs.
 - Log levels: ERROR (actionable), WARN (investigate), INFO (audit), DEBUG (dev).
 - No secrets, tokens, or PII in logs — ever.
 - Add metrics for request rates, error rates, and latency percentiles.

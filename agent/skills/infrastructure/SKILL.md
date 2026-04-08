@@ -10,6 +10,7 @@ description: Docker, CI/CD, cloud deployment, and infrastructure-as-code best pr
 - Multi-stage builds to keep production images small.
 - Health checks on every service — no silent failures.
 - Pin dependency versions — no floating tags in production.
+- Python: Use requirements.txt with pinned versions or poetry.lock.
 - Secrets via vault or env injection, never in Dockerfiles or repos.
 - Right-size instances based on utilization — use spot instances for stateless workloads.
 - Tag resources for cost allocation and reporting.

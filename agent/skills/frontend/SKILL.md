@@ -11,3 +11,4 @@ description: UI development, accessibility, responsiveness, and client-side best
 - Client-side validation is UX, server-side validation is security — use both.
 - Minimize re-renders — memoize expensive computations.
 - Bundle size matters — audit and trim dependencies regularly.
+- Static sites: Use pre-rendered HTML, critical CSS, lazy images.

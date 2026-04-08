@@ -10,3 +10,10 @@ description: Write and edit code following repo conventions with smallest comple
 - Use available tools (read, write, edit, bash) to inspect and verify.
 - Consider edge cases, integration impact, and backward compatibility.
 - Keep code runnable and production-ready on every change.
+
+Python-specific (when applicable):
+- PEP 8 formatting, type hints, docstrings.
+- Virtual environments for dependency isolation.
+- pytest for testing, coverage reports.
+- Use linters: black, flake8, mypy.
+- Requirements pinned, no floating versions.
