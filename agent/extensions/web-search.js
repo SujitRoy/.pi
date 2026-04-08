@@ -15,9 +15,27 @@
 const https = require('https');
 const http = require('http');
 const { URL } = require('url');
+const path = require('path');
+const fs = require('fs');
+
+// Load .env file if it exists (for local configuration)
+const envPath = path.join(__dirname, '..', '..', '.env');
+if (fs.existsSync(envPath)) {
+  const envContent = fs.readFileSync(envPath, 'utf8');
+  envContent.split('\n').forEach(line => {
+    const [key, ...valueParts] = line.split('=');
+    if (key && valueParts.length > 0) {
+      const value = valueParts.join('=').trim();
+      if (key.trim() === 'SEARXNG_BASE_URL' && !process.env.SEARXNG_BASE_URL) {
+        process.env.SEARXNG_BASE_URL = value;
+      }
+    }
+  });
+}
 
 // SearXNG API Configuration
 // IMPORTANT: Set SEARXNG_BASE_URL environment variable to your SearXNG instance URL
+// Falls back to .env file or localhost:8080
 const SEARXNG_CONFIG = {
   baseUrl: process.env.SEARXNG_BASE_URL || 'http://localhost:8080',
   defaultLanguage: 'en',
