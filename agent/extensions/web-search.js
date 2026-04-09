@@ -395,7 +395,8 @@ async function search(query, options = {}) {
 
   // Create cache key
   const cacheKey = `${query}_${language}_${category}_${maxResults}_${depth}`;
-  
+  const isTimeSensitive = needsRecentResults(query);
+
   // Try to get from cache first (skip for deep mode as it fetches external content)
   // Skip cache for weather/time-sensitive queries - users want live data
   if (depth !== 'deep' && !isTimeSensitive) {
@@ -445,7 +446,6 @@ async function search(query, options = {}) {
     }
 
     // For time-sensitive queries, filter out stale results and sort by recency
-    const isTimeSensitive = needsRecentResults(query);
     if (isTimeSensitive) {
       sortedResults = filterByRecency(sortedResults, 3); // Max 3 days old
       sortedResults = sortByRecency(sortedResults);
