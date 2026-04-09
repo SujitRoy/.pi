@@ -197,7 +197,50 @@ function detectQueryType(query) {
 // ============================================================================
 
 /**
- * Fetch and extract content from a URL (simplified readability)
+ * Parse HTML and extract readable text content
+ * Uses a robust approach without external dependencies
+ */
+function extractTextFromHTML(html) {
+  // Remove script, style, noscript, svg content entirely
+  let text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<svg[\s\S]*?<\/svg>/gi, ' ');
+
+  // Extract meaningful content from structural elements
+  text = text
+    // Convert block elements to newlines
+    .replace(/<(?:p|div|article|section|header|footer|main|li|tr|h[1-6])[^>]*>/gi, '\n')
+    .replace(/<\/(?:p|div|article|section|header|footer|main|li|tr|h[1-6])>/gi, '\n')
+    // Handle line breaks
+    .replace(/<(?:br|hr)[^>]*\/?>/gi, '\n')
+    // Handle links: keep text, add URL
+    .replace(/<a[^>]+href=["']([^"']+)["'][^>]*>([^<]*)<\/a>/gi, '$2 ($1)')
+    // Handle images: keep alt text
+    .replace(/<img[^>]+alt=["']([^"']*)["'][^>]*\/?>/gi, ' [img: $1] ')
+    .replace(/<img[^>]*\/?>/gi, ' ')
+    // Remove all remaining HTML tags
+    .replace(/<[^>]+>/g, ' ')
+    // Decode common HTML entities
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    // Clean up whitespace
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s*\n/g, '\n')
+    .trim();
+
+  return text;
+}
+
+/**
+ * Fetch and extract content from a URL (deep mode)
  */
 async function fetchSourceContent(url) {
   try {
@@ -207,22 +250,16 @@ async function fetchSourceContent(url) {
     const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
     const title = titleMatch ? titleMatch[1].trim() : '';
 
-    // Extract meta description
+    // Extract meta description (check both attribute orders)
     const descMatch = html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i)
       || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']description["']/i);
     const description = descMatch ? descMatch[1].trim() : '';
 
-    // Extract body text (simple approach - strip HTML tags)
+    // Extract main content using improved HTML parser
     const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
     let bodyText = '';
     if (bodyMatch) {
-      bodyText = bodyMatch[1]
-        .replace(/<script[\s\S]*?<\/script>/gi, '')
-        .replace(/<style[\s\S]*?<\/style>/gi, '')
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 2000); // Limit to 2000 chars
+      bodyText = extractTextFromHTML(bodyMatch[1]).slice(0, 2000);
     }
 
     return {
