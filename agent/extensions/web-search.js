@@ -29,9 +29,18 @@ if (fs.existsSync(envPath)) {
       if (key.trim() === 'SEARXNG_BASE_URL' && !process.env.SEARXNG_BASE_URL) {
         process.env.SEARXNG_BASE_URL = value;
       }
+      // Future enhancement: Add proxy support
+      // if (key.trim() === 'PROXY_URL' && !process.env.PROXY_URL) {
+      //   process.env.PROXY_URL = value;
+      // }
     }
   });
 }
+
+// Proxy configuration (to enable in future)
+// const PROXY_CONFIG = {
+//   proxyUrl: process.env.PROXY_URL || null
+// };
 
 // SearXNG Configuration
 const SEARXNG_CONFIG = {
@@ -39,6 +48,41 @@ const SEARXNG_CONFIG = {
   defaultLanguage: 'en',
   maxResults: 8
 };
+
+// Simple in-memory cache for search results
+const searchCache = new Map();
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes TTL
+
+/**
+ * Get cached result if available and not expired
+ */
+function getCachedResult(cacheKey) {
+  const cached = searchCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.data;
+  }
+  // Remove expired entry
+  if (cached) {
+    searchCache.delete(cacheKey);
+  }
+  return null;
+}
+
+/**
+ * Cache search result
+ */
+function setCachedResult(cacheKey, data) {
+  searchCache.set(cacheKey, {
+    data,
+    timestamp: Date.now()
+  });
+  
+  // Clean up old entries periodically
+  if (searchCache.size > 50) { // Limit cache size
+    const firstKey = searchCache.keys().next().value;
+    searchCache.delete(firstKey);
+  }
+}
 
 // ============================================================================
 // HTTP Helpers
@@ -59,11 +103,12 @@ async function makeHttpRequest(url, method = 'GET', postData = null) {
     headers['Content-Type'] = 'application/x-www-form-urlencoded';
   }
 
+  const timeoutMs = 15000;
   const response = await fetch(url, {
     method,
     headers,
     body,
-    signal: AbortSignal.timeout(15000)
+    signal: AbortSignal.timeout(timeoutMs)
   });
 
   if (!response.ok) {
@@ -193,17 +238,30 @@ async function fetchSourceContent(url) {
 }
 
 /**
- * Fetch content from top N sources
+ * Fetch content from top N sources with concurrency limiting
  */
 async function fetchTopSources(results, limit = 3) {
   const topUrls = results.results.slice(0, limit);
-  const fetchPromises = topUrls.map(r => fetchSourceContent(r.url));
-
-  const fetched = await Promise.allSettled(fetchPromises);
-  return fetched.map((result, i) => ({
-    ...topUrls[i],
-    fetchedContent: result.status === 'fulfilled' ? result.value : { url: topUrls[i].url, title: 'Fetch failed', excerpt: result.reason?.message || 'Unknown error' }
-  }));
+  
+  // Limit concurrent requests to prevent overwhelming servers
+  const CONCURRENT_LIMIT = 2;
+  const fetched = [];
+  
+  for (let i = 0; i < topUrls.length; i += CONCURRENT_LIMIT) {
+    const batch = topUrls.slice(i, i + CONCURRENT_LIMIT);
+    const batchPromises = batch.map(r => fetchSourceContent(r.url));
+    const batchResults = await Promise.allSettled(batchPromises);
+    
+    batchResults.forEach((result, j) => {
+      const originalUrl = batch[j];
+      fetched.push({
+        ...originalUrl,
+        fetchedContent: result.status === 'fulfilled' ? result.value : { url: originalUrl.url, title: 'Fetch failed', excerpt: result.reason?.message || 'Unknown error' }
+      });
+    });
+  }
+  
+  return fetched;
 }
 
 // ============================================================================
@@ -268,6 +326,15 @@ function buildConfidence(results, query, queryType) {
 // ============================================================================
 
 /**
+ * Extract location keywords from query for relevance filtering
+ */
+function extractLocation(query) {
+  const words = query.toLowerCase().split(/\s+/);
+  const stopWords = ['weather', 'today', 'current', 'forecast', 'temperature', 'in', 'what', 'is', 'how', '?', 'and', 'the', 'of', 'for', 'now'];
+  return words.filter(w => !stopWords.includes(w) && w.length > 2);
+}
+
+/**
  * Filter results by recency (for time-sensitive queries)
  * Removes results older than the specified days
  */
@@ -326,6 +393,18 @@ async function search(query, options = {}) {
     depth = 'standard'
   } = options;
 
+  // Create cache key
+  const cacheKey = `${query}_${language}_${category}_${maxResults}_${depth}`;
+  
+  // Try to get from cache first (skip for deep mode as it fetches external content)
+  if (depth !== 'deep') {
+    const cachedResult = getCachedResult(cacheKey);
+    if (cachedResult) {
+      console.log('[web-search] Returning cached result for:', query);
+      return cachedResult;
+    }
+  }
+
   const searchData = {
     q: query,
     format: 'json',
@@ -369,6 +448,16 @@ async function search(query, options = {}) {
     if (isTimeSensitive) {
       sortedResults = filterByRecency(sortedResults, 3); // Max 3 days old
       sortedResults = sortByRecency(sortedResults);
+
+      // For weather/news queries, also filter out results that don't mention the query location
+      const locationKeywords = extractLocation(query);
+      if (locationKeywords.length > 0) {
+        sortedResults = sortedResults.filter(result => {
+          const text = `${result.title} ${result.content} ${result.url}`.toLowerCase();
+          // At least one location keyword should appear in the result
+          return locationKeywords.some(kw => text.includes(kw));
+        });
+      }
     }
 
     const response = {
@@ -396,10 +485,15 @@ async function search(query, options = {}) {
       response.fetchedSources = await fetchTopSources(response, 3);
     }
 
+    // Cache the result if not in deep mode
+    if (depth !== 'deep') {
+      setCachedResult(cacheKey, response);
+    }
+    
     return response;
   } catch (error) {
     console.error('[web-search] Search failed:', error.message);
-    return {
+    const errorResponse = {
       results: [],
       suggestions: [],
       answers: [],
@@ -409,6 +503,13 @@ async function search(query, options = {}) {
       queryType: detectQueryType(query),
       confidence: { score: 0, level: 'low', reasons: ['Search failed'], totalResults: 0, returnedCount: 0 }
     };
+    
+    // Cache error responses too to avoid repeated failed requests
+    if (depth !== 'deep') {
+      setCachedResult(cacheKey, errorResponse);
+    }
+    
+    return errorResponse;
   }
 }
 
