@@ -397,7 +397,8 @@ async function search(query, options = {}) {
   const cacheKey = `${query}_${language}_${category}_${maxResults}_${depth}`;
   
   // Try to get from cache first (skip for deep mode as it fetches external content)
-  if (depth !== 'deep') {
+  // Skip cache for weather/time-sensitive queries - users want live data
+  if (depth !== 'deep' && !isTimeSensitive) {
     const cachedResult = getCachedResult(cacheKey);
     if (cachedResult) {
       console.log('[web-search] Returning cached result for:', query);
@@ -485,8 +486,8 @@ async function search(query, options = {}) {
       response.fetchedSources = await fetchTopSources(response, 3);
     }
 
-    // Cache the result if not in deep mode
-    if (depth !== 'deep') {
+    // Cache the result if not in deep mode and not time-sensitive
+    if (depth !== 'deep' && !isTimeSensitive) {
       setCachedResult(cacheKey, response);
     }
     
@@ -504,8 +505,8 @@ async function search(query, options = {}) {
       confidence: { score: 0, level: 'low', reasons: ['Search failed'], totalResults: 0, returnedCount: 0 }
     };
     
-    // Cache error responses too to avoid repeated failed requests
-    if (depth !== 'deep') {
+    // Cache error responses too (except for time-sensitive queries and deep mode)
+    if (depth !== 'deep' && !isTimeSensitive) {
       setCachedResult(cacheKey, errorResponse);
     }
     
