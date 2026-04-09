@@ -74,7 +74,7 @@ if ($content -notmatch [regex]::Escape($oldText)) {
     Write-Host "ERROR: Could not find expected pattern in openai-completions.js" -ForegroundColor Red
     Write-Host "The PI version may have changed. Manual patching required." -ForegroundColor Red
     Write-Host ""
-    Write-Host "Look for this function in $TARGET:"
+    Write-Host "Look for this function in ${TARGET}:"
     Write-Host "  function createClient(model, context, apiKey, optionsHeaders)"
     Write-Host "And add the AgentRouter header block before: return new OpenAI({"
     exit 1
