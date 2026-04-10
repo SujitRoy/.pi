@@ -145,14 +145,22 @@ Enables live web search and URL content fetching via a [SearXNG](https://github.
    SEARXNG_BASE_URL=http://your-searxng-host:port
    ```
 
-2. Install the extension:
+2. Install the extension **globally** (available in all PI sessions):
    ```bash
+   # From ~/.pi directory
    pi install ./agent/extensions/web-search.js
    ```
+   > Omit `-l` (local flag) to install globally. Without `-l`, the tools are available in every PI session regardless of directory.
 
-3. Verify installation:
+3. Verify both tools are available:
    ```bash
    pi list
+   ```
+   Should show under "User packages:"
+
+4. Start using:
+   ```bash
+   pi   # Both tools are now available in any session
    ```
 
 **Usage Examples:**
