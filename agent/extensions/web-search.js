@@ -8,6 +8,11 @@
  * - Query intent detection with domain boosting
  * - Source content fetching (deep mode)
  * - Result ranking & confidence scoring
+ * - Direct URL content fetching (fetch_content tool)
+ *
+ * Tools Provided:
+ * - web_search({ query, category, language, maxResults, depth })
+ * - fetch_content({ url, prompt? })
  *
  * Configuration:
  * - Set SEARXNG_BASE_URL environment variable
@@ -89,12 +94,71 @@ function setCachedResult(cacheKey, data) {
 // ============================================================================
 
 /**
- * Make an HTTP request (GET or POST) using fetch API
+ * Check if URL targets internal/private addresses (SSRF protection)
  */
-async function makeHttpRequest(url, method = 'GET', postData = null) {
+function isBlockedInternalURL(url) {
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+    
+    // Block localhost, loopback, and internal IPs
+    const blockedHostnames = ['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]'];
+    if (blockedHostnames.includes(hostname)) {
+      return true;
+    }
+    
+    // Block private IP ranges: 10.x.x.x, 172.16-31.x.x, 192.168.x.x
+    const privateIPPattern = /^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|169\.254\.)/;
+    if (privateIPPattern.test(hostname)) {
+      return true;
+    }
+    
+    // Block .local and .internal TLDs
+    if (hostname.endsWith('.local') || hostname.endsWith('.internal')) {
+      return true;
+    }
+    
+    return false;
+  } catch {
+    return true; // Block invalid URLs
+  }
+}
+
+/**
+ * Validate Content-Type header for text-based content
+ */
+function isTextBasedContent(contentType) {
+  if (!contentType) return true; // Allow if no content-type (be permissive)
+  
+  const textTypes = [
+    'text/html', 'text/plain', 'text/xml', 'text/markdown',
+    'application/xhtml+xml', 'application/xml',
+    'application/json', 'application/javascript',
+    'text/'
+  ];
+  
+  return textTypes.some(type => contentType.toLowerCase().includes(type));
+}
+
+/**
+ * Make an HTTP request (GET or POST) using fetch API
+ * Enhanced with SSRF protection, redirect following, and content-type validation
+ */
+async function makeHttpRequest(url, method = 'GET', postData = null, options = {}) {
+  const { 
+    maxRedirects = 5, 
+    validateContentType = false,
+    acceptHeader = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+  } = options;
+  
+  // SSRF Protection: Block internal URLs
+  if (isBlockedInternalURL(url)) {
+    throw new Error(`Access to internal/private URLs is blocked for security: ${url}`);
+  }
+  
   const headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Accept': 'application/json'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': acceptHeader
   };
 
   let body = null;
@@ -103,19 +167,60 @@ async function makeHttpRequest(url, method = 'GET', postData = null) {
     headers['Content-Type'] = 'application/x-www-form-urlencoded';
   }
 
-  const timeoutMs = 15000;
-  const response = await fetch(url, {
-    method,
-    headers,
-    body,
-    signal: AbortSignal.timeout(timeoutMs)
-  });
-
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  const timeoutMs = options.timeout || 15000;
+  
+  // Follow redirects manually for better control
+  let currentUrl = url;
+  let redirectCount = 0;
+  
+  while (true) {
+    const response = await fetch(currentUrl, {
+      method,
+      headers,
+      body,
+      redirect: 'manual', // Handle redirects manually
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    
+    // Handle redirects (301, 302, 303, 307, 308)
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      redirectCount++;
+      
+      if (redirectCount > maxRedirects) {
+        throw new Error(`Too many redirects (max: ${maxRedirects})`);
+      }
+      
+      const location = response.headers.get('location');
+      if (!location) {
+        throw new Error(`Redirect response without Location header`);
+      }
+      
+      // Resolve relative URLs
+      currentUrl = new URL(location, currentUrl).href;
+      
+      // SSRF check on redirect target
+      if (isBlockedInternalURL(currentUrl)) {
+        throw new Error(`Redirect to internal URL blocked: ${currentUrl}`);
+      }
+      
+      console.log(`[web-search] Following redirect (${response.status}): ${currentUrl}`);
+      continue;
+    }
+    
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+    
+    // Content-Type validation (optional)
+    if (validateContentType) {
+      const contentType = response.headers.get('content-type');
+      if (!isTextBasedContent(contentType)) {
+        throw new Error(`Unsupported content type: ${contentType}. Only text-based content is allowed.`);
+      }
+    }
+    
+    return await response.text();
   }
-
-  return await response.text();
 }
 
 // ============================================================================
@@ -241,10 +346,30 @@ function extractTextFromHTML(html) {
 
 /**
  * Fetch and extract content from a URL (deep mode)
+ * Enhanced with caching, content-type validation, and configurable limits
  */
-async function fetchSourceContent(url) {
+async function fetchSourceContent(url, options = {}) {
+  const { 
+    maxContentLength = 2000,
+    useCache = true,
+    timeout = 15000
+  } = options;
+  
+  // Check cache first
+  if (useCache) {
+    const cacheKey = `content_${url}`;
+    const cached = getCachedResult(cacheKey);
+    if (cached) {
+      console.log('[web-search] Using cached content for:', url);
+      return cached;
+    }
+  }
+  
   try {
-    const html = await makeHttpRequest(url);
+    const html = await makeHttpRequest(url, 'GET', null, { 
+      validateContentType: true,
+      timeout
+    });
 
     // Extract title
     const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
@@ -259,15 +384,23 @@ async function fetchSourceContent(url) {
     const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
     let bodyText = '';
     if (bodyMatch) {
-      bodyText = extractTextFromHTML(bodyMatch[1]).slice(0, 2000);
+      bodyText = extractTextFromHTML(bodyMatch[1]).slice(0, maxContentLength);
     }
 
-    return {
+    const result = {
       url,
       title,
       description,
       excerpt: bodyText || description || 'No content extracted'
     };
+    
+    // Cache the result
+    if (useCache) {
+      const cacheKey = `content_${url}`;
+      setCachedResult(cacheKey, result);
+    }
+    
+    return result;
   } catch (error) {
     console.error(`[web-search] Failed to fetch source ${url}:`, error.message);
     return { url, title: 'Fetch failed', description: '', excerpt: `Error: ${error.message}` };
@@ -757,6 +890,121 @@ module.exports = function(api) {
           `An unexpected error occurred while searching.\n\n` +
           `**Error:** ${error.message || 'Unknown error'}`;
         console.error('[web-search] Tool execution failed:', error);
+        return { content: [{ type: 'text', text: errorText }], isError: true };
+      }
+    }
+  });
+
+  // Register the fetch_content tool
+  api.registerTool({
+    name: 'fetch_content',
+    description: 'Fetch and extract content from a specific URL. Useful for reading articles, documentation, or any web page.',
+    parameters: {
+      type: 'object',
+      properties: {
+        url: {
+          type: 'string',
+          description: 'The URL to fetch content from'
+        },
+        prompt: {
+          type: 'string',
+          description: 'Optional: Specific question or focus when extracting content'
+        },
+        maxLength: {
+          type: 'number',
+          description: 'Maximum characters to extract from content (default: 2000)',
+          default: 2000
+        },
+        timeout: {
+          type: 'number',
+          description: 'Request timeout in milliseconds (default: 15000)',
+          default: 15000
+        }
+      },
+      required: ['url']
+    },
+    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+      console.log('[web-search] fetch_content called with params:', JSON.stringify(params, null, 2));
+
+      const url = params?.url;
+
+      if (!url || typeof url !== 'string' || url.trim() === '') {
+        const errorText = `⚠️ **Fetch Content Error**\n\n` +
+          `No URL provided. Please provide a URL to fetch.\n\n` +
+          `**Example:** fetch_content({ url: "https://example.com/article" })`;
+        console.error('[web-search] fetch_content error: No URL');
+        return { content: [{ type: 'text', text: errorText }], isError: true };
+      }
+
+      const cleanUrl = url.trim();
+
+      // Validate URL format
+      let validUrl;
+      try {
+        validUrl = new URL(cleanUrl);
+        if (!['http:', 'https:'].includes(validUrl.protocol)) {
+          throw new Error('Only HTTP/HTTPS URLs are supported');
+        }
+      } catch (error) {
+        const errorText = `⚠️ **Fetch Content Error**\n\n` +
+          `Invalid URL: ${url}\n\n` +
+          `**Details:** ${error.message}\n\n` +
+          `**Example:** fetch_content({ url: "https://example.com/article" })`;
+        console.error('[web-search] fetch_content error: Invalid URL', error.message);
+        return { content: [{ type: 'text', text: errorText }], isError: true };
+      }
+
+      // Check for internal/private URLs (SSRF protection)
+      if (isBlockedInternalURL(cleanUrl)) {
+        const errorText = `⚠️ **Fetch Content Blocked**\n\n` +
+          `Access to internal/private URLs is not allowed for security reasons.\n\n` +
+          `**URL:** ${cleanUrl}\n\n` +
+          `*This URL appears to target a private or internal network.*`;
+        console.error('[web-search] fetch_content blocked: SSRF protection triggered');
+        return { content: [{ type: 'text', text: errorText }], isError: true };
+      }
+
+      try {
+        console.log('[web-search] Fetching content from:', cleanUrl);
+        const content = await fetchSourceContent(cleanUrl, {
+          maxContentLength: params?.maxLength || 2000,
+          useCache: true,
+          timeout: params?.timeout || 15000
+        });
+
+        if (!content || content.title === 'Fetch failed') {
+          const errorText = `⚠️ **Fetch Content Failed**\n\n` +
+            `Could not extract content from: ${cleanUrl}\n\n` +
+            `**Details:** ${content?.excerpt || 'Unknown error'}\n\n` +
+            `*Tip: The page may require JavaScript, authentication, or may not be HTML content.*`;
+          console.error('[web-search] fetch_content failed:', content?.excerpt);
+          return { content: [{ type: 'text', text: errorText }], isError: true };
+        }
+
+        // Format the response
+        let response = `## 📄 ${content.title}\n\n`;
+        response += `**Source:** ${content.url}\n\n`;
+        response += `---\n\n${content.excerpt}\n\n`;
+        response += `---\n`;
+        response += `*Content extracted successfully.*`;
+
+        if (params?.prompt) {
+          response = `## 📄 Content from: ${content.title}\n\n`;
+          response += `**Source:** ${content.url}\n`;
+          response += `**Your question:** ${params.prompt}\n\n`;
+          response += `---\n\n`;
+          response += `**Extracted Content:**\n\n${content.excerpt}\n\n`;
+          response += `---\n`;
+          response += `*Review the content above to answer your question.*`;
+        }
+
+        return { content: [{ type: 'text', text: response }] };
+      } catch (error) {
+        const errorText = `⚠️ **Fetch Content Failed**\n\n` +
+          `An unexpected error occurred while fetching content.\n\n` +
+          `**URL:** ${cleanUrl}\n` +
+          `**Error:** ${error.message || 'Unknown error'}`;
+        console.error('[web-search] fetch_content unexpected error:', error);
         return { content: [{ type: 'text', text: errorText }], isError: true };
       }
     }
