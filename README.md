@@ -11,6 +11,7 @@ Personal skills, model configurations, and coding standards for the [PI Coding A
 │   ├── settings.json     Default model and thinking level
 │   ├── AGENTS.md         Coding standards and behavior rules
 │   ├── skills/           High-performance skill modules
+│   ├── extensions/       JavaScript extensions (callable tools)
 │   ├── auth.json         Authentication tokens (gitignored)
 │   ├── sessions/         Conversation history (gitignored)
 │   └── bin/              Downloaded tools (gitignored)
@@ -121,6 +122,56 @@ description: Docker and container management best practices
 When working with Docker:
 - ...
 ```
+
+## Extensions
+
+Extensions are JavaScript modules that add callable tools to the PI agent.
+
+### Web Search Extension
+
+Enables live web search and URL content fetching via a [SearXNG](https://github.com/searxng/searxng) instance.
+
+**Available Tools:**
+
+| Tool | Purpose |
+|------|---------|
+| `web_search` | Search the web with depth modes (fast, standard, deep) |
+| `fetch_content` | Extract readable content from any URL |
+
+**Installation:**
+
+1. Configure your SearXNG URL in `.env` (see `.env.example`):
+   ```
+   SEARXNG_BASE_URL=http://your-searxng-host:port
+   ```
+
+2. Install the extension:
+   ```bash
+   pi install ./agent/extensions/web-search.js
+   ```
+
+3. Verify installation:
+   ```bash
+   pi list
+   ```
+
+**Usage Examples:**
+```javascript
+// Search the web
+web_search({ query: "TypeScript 5.0 features", depth: "standard" })
+web_search({ query: "latest AI news", category: "news", depth: "deep" })
+
+// Fetch content from a URL
+fetch_content({ url: "https://example.com/article" })
+fetch_content({ url: "https://docs.python.org/3/tutorial", prompt: "How do decorators work?" })
+fetch_content({ url: "https://example.com/long-article", maxLength: 5000 })
+```
+
+**Security Features:**
+- SSRF protection (blocks internal/private network URLs)
+- Content-Type validation (text-based content only)
+- Automatic redirect following (up to 5 hops)
+- Intelligent caching (5-min TTL)
 
 ## Syncing Across Machines
 
