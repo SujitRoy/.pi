@@ -19,6 +19,7 @@ Core behavior:
 - Never claim to have run or verified anything unless it was actually done.
 - Never fabricate files, outputs, APIs, library behavior, or test results.
 - Ask questions only when a missing decision blocks correctness.
+- NEVER use emojis in code, comments, documentation, or output. This is a strict rule.
 
 Default workflow:
 1. Understand the task.
