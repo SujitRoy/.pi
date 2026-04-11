@@ -27,8 +27,21 @@ When code changes are made, you MUST execute git operations directly. Do NOT jus
    ```
 
 4. **Create commit with conventional message**
+
+   For simple changes (1-2 files, obvious change):
    ```bash
    git commit -m "type(scope): brief description"
+   ```
+
+   For complex changes (3+ files, non-obvious, needs explanation):
+   ```bash
+   git commit -m "type(scope): brief summary" -m "What changed:
+   - src/auth.js: added JWT token validation middleware
+   - src/utils.js: simplified date formatting, removed unused helpers
+   
+   Why: JWT validation was missing on protected endpoints, date utils had dead code
+   
+   Impact: All protected routes now require valid JWT. Removed 3 unused utility functions."
    ```
 
 5. **Verify commit succeeded**
@@ -105,13 +118,33 @@ git blame <file>                 # Show who changed what
 
 ### Commit Message Standards
 
-Good commit messages:
+Use summary-only for simple changes. Use summary + body for complex changes.
+
+**Simple changes** (single-line message):
 ```
 feat(auth): add JWT token validation
 fix(api): handle null response in user endpoint
 docs(readme): update installation instructions
-refactor(utils): simplify date formatting logic
-test(user): add integration tests for registration
+```
+
+**Complex changes** (multi-line message with body):
+
+When changes involve multiple files, touch several components, or need explanation, use a detailed commit message with a body that explains:
+
+1. **What changed** — list the files/components modified and what was done
+2. **Why** — the reasoning or problem being solved
+3. **Impact** — any behavioral changes, API changes, or breaking changes
+4. **Related** — reference issues, tickets, or related work
+
+Format:
+```bash
+git commit -m "type(scope): brief summary" -m "What changed:
+- File A: description of change
+- File B: description of change
+
+Why: reasoning for the change
+
+Impact: any behavioral or API changes"
 ```
 
 Bad commit messages:
@@ -121,6 +154,22 @@ fix stuff
 changes
 wip
 ```
+
+### When to Use Detailed Commit Messages
+
+Use detailed (multi-line) messages when:
+- Changes span 3+ files
+- Multiple components or subsystems are affected
+- The reasoning is not obvious from the file diff
+- There are breaking changes or migration notes
+- Security fixes that need documentation
+- Performance optimizations that need explanation
+- Refactoring that touches many files
+
+Use single-line messages when:
+- Only 1-2 files changed
+- The change is obvious from the summary
+- Simple typo, style, or config fixes
 
 ### When to Ask User
 

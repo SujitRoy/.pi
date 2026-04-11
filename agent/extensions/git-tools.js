@@ -26,6 +26,8 @@
 const { execFile } = require('child_process');
 const util = require('util');
 const path = require('path');
+const os = require('os');
+const fs = require('fs');
 
 const execFileAsync = util.promisify(execFile);
 
@@ -181,8 +183,15 @@ async function gitCommit(message, cwd) {
     };
   }
 
-  const args = ['commit', '-m', message];
+  // Write message to temp file for multi-line support
+  const tmpFile = path.join(os.tmpdir(), `git-commit-msg-${Date.now()}.txt`);
+  fs.writeFileSync(tmpFile, message, 'utf8');
+
+  const args = ['commit', '-F', tmpFile];
   const result = await executeGitCommand(cwd, args);
+
+  // Clean up temp file
+  try { fs.unlinkSync(tmpFile); } catch (e) { /* ignore */ }
   
   if (!result.success) {
     return { 
@@ -196,13 +205,15 @@ async function gitCommit(message, cwd) {
   const lines = result.stdout.split('\n');
   const commitLine = lines.find(line => line.match(/^\[.+ [a-f0-9]{7}\]/));
   const commitMatch = commitLine?.match(/\[([^\s]+) ([a-f0-9]{7})\] (.+)$/);
+  const summary = message.split('\n')[0].trim();
 
   return {
     success: true,
     hash: commitMatch ? commitMatch[2] : null,
     branch: commitMatch ? commitMatch[1] : null,
-    message: commitMatch ? commitMatch[3] : message,
-    summary: result.stdout
+    message: commitMatch ? commitMatch[3] : summary,
+    summary: result.stdout,
+    isDetailed: message.includes('\n')
   };
 }
 
@@ -625,13 +636,13 @@ module.exports = function(api) {
   // Register git_commit tool
   api.registerTool({
     name: 'git_commit',
-    description: 'Create a git commit with a conventional commit message.',
+    description: 'Create a git commit with a conventional commit message. For complex changes, provide a body explaining what changed, why, and the impact.',
     parameters: {
       type: 'object',
       properties: {
         message: {
           type: 'string',
-          description: 'Commit message following conventional commits (type: description)'
+          description: 'Commit message. For simple changes: "type(scope): description". For complex changes: "type(scope): summary" followed by detailed body explaining what changed across which files, why, and the impact.'
         },
         cwd: {
           type: 'string',
@@ -645,7 +656,7 @@ module.exports = function(api) {
         const message = params?.message;
         if (!message || typeof message !== 'string' || message.trim() === '') {
           return {
-            content: [{ type: 'text', text: '**Git Commit Failed**\n\nCommit message is required. Use conventional commits format: `type(scope): description`' }],
+            content: [{ type: 'text', text: '**Git Commit Failed**\n\nCommit message is required.\n\nFor simple changes:\n  "type(scope): description"\n\nFor complex changes (3+ files, non-obvious changes):\n  "type(scope): summary"\n\n  "What changed:\n  - File A: did X\n  - File B: did Y\n\n  Why: the problem this solves\n\n  Impact: behavioral or API changes"' }],
             isError: true
           };
         }
@@ -659,7 +670,9 @@ module.exports = function(api) {
           };
         }
 
-        const text = `**Commit Created**\n\n**Branch:** \`${result.branch}\`\n**Hash:** \`${result.hash}\`\n**Message:** ${result.message}`;
+        const text = result.isDetailed
+          ? `**Commit Created (detailed)**\n\n**Branch:** \`${result.branch}\`\n**Hash:** \`${result.hash}\`\n**Summary:** ${result.message}\n\nFull message includes body with change details.`
+          : `**Commit Created**\n\n**Branch:** \`${result.branch}\`\n**Hash:** \`${result.hash}\`\n**Message:** ${result.message}`;
         return { content: [{ type: 'text', text }] };
       } catch (error) {
         return {
