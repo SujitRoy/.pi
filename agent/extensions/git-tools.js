@@ -167,51 +167,49 @@ async function executeGitCommand(cwd, args, options = {}) {
   const workingDir = validateCwd(cwd);
 
   // Build abort promise if signal provided
-  const abortPromise = signal
-    ? new Promise((_, reject) => {
-        signal.addEventListener('abort', () => {
-          reject(new Error('Operation cancelled'));
-        }, { once: true });
-      })
-    : Promise.resolve();
+  let abortController;
+  if (signal) {
+    abortController = { promise: new Promise((_, reject) => {
+      signal.addEventListener('abort', () => {
+        reject(new Error('Operation cancelled'));
+      }, { once: true });
+    }) };
+  }
 
   try {
-    const childProcess = execFile('git', args, {
-      cwd: workingDir,
-      timeout,
-      maxBuffer,
-      env: { ...process.env }
+    const result = await new Promise((resolve, reject) => {
+      let stdout = '';
+      let stderr = '';
+
+      const childProcess = execFile('git', args, {
+        cwd: workingDir,
+        timeout,
+        maxBuffer,
+        env: { ...process.env }
+      }, (error, stdout, stderr) => {
+        if (error) {
+          const err = new Error(error.message);
+          err.exitCode = error.code;
+          err.stdout = stdout || '';
+          err.stderr = stderr || '';
+          reject(err);
+        } else {
+          resolve({ stdout: stdout || '', stderr: stderr || '' });
+        }
+      });
+
+      // Attach signal to child process
+      if (signal) {
+        signal.addEventListener('abort', () => {
+          childProcess.kill('SIGTERM');
+        }, { once: true });
+      }
     });
-
-    // Attach signal to child process
-    if (signal) {
-      signal.addEventListener('abort', () => {
-        childProcess.kill('SIGTERM');
-      }, { once: true });
-    }
-
-    const { stdout, stderr } = await Promise.race([
-      new Promise((resolve, reject) => {
-        childProcess.on('error', reject);
-        childProcess.on('close', (code) => {
-          if (code === 0) {
-            resolve({ stdout: childProcess.stdout, stderr: childProcess.stderr });
-          } else {
-            const error = new Error(`git exited with code ${code}`);
-            error.exitCode = code;
-            error.stdout = childProcess.stdout;
-            error.stderr = childProcess.stderr;
-            reject(error);
-          }
-        });
-      }),
-      abortPromise
-    ]);
 
     return {
       success: true,
-      stdout: stdout.trim(),
-      stderr: stderr.trim()
+      stdout: result.stdout.trim(),
+      stderr: result.stderr.trim()
     };
   } catch (error) {
     // Preserve full error information
