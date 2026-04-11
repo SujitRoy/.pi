@@ -46,39 +46,6 @@ const fs = require('fs');
 const execFileAsync = util.promisify(execFile);
 
 // ============================================================================
-// Logging Utility
-// ============================================================================
-
-const LOG_LEVELS = {
-  DEBUG: 'debug',
-  INFO: 'info',
-  WARN: 'warn',
-  ERROR: 'error'
-};
-
-function log(message, level = LOG_LEVELS.INFO) {
-  const prefix = '[git-tools]';
-  const timestamp = new Date().toISOString();
-  const logMessage = `${prefix} [${level.toUpperCase()}] ${timestamp} - ${message}`;
-
-  switch (level) {
-    case LOG_LEVELS.ERROR:
-      console.error(logMessage);
-      break;
-    case LOG_LEVELS.WARN:
-      console.warn(logMessage);
-      break;
-    case LOG_LEVELS.DEBUG:
-      if (process.env.DEBUG === 'git-tools') {
-        console.log(logMessage);
-      }
-      break;
-    default:
-      console.log(logMessage);
-  }
-}
-
-// ============================================================================
 // Security Utilities
 // ============================================================================
 
@@ -140,6 +107,21 @@ function validateCwd(cwd) {
 }
 
 /**
+ * Validate that directory is a git repository
+ */
+async function validateGitRepo(workingDir) {
+  try {
+    const result = await execFileAsync('git', ['rev-parse', '--git-dir'], {
+      cwd: workingDir,
+      timeout: 5000
+    });
+    return true;
+  } catch {
+    throw new Error(`Not a git repository: ${workingDir}`);
+  }
+}
+
+/**
  * Validate numeric parameter
  */
 function validateNumber(value, name, min = 1, max = 1000) {
@@ -166,14 +148,30 @@ async function executeGitCommand(cwd, args, options = {}) {
 
   const workingDir = validateCwd(cwd);
 
-  // Build abort promise if signal provided
-  let abortController;
-  if (signal) {
-    abortController = { promise: new Promise((_, reject) => {
-      signal.addEventListener('abort', () => {
-        reject(new Error('Operation cancelled'));
-      }, { once: true });
-    }) };
+  // Validate it's a git repository (check once, cache result)
+  if (!executeGitCommand._gitReposChecked?.has(workingDir)) {
+    try {
+      await validateGitRepo(workingDir);
+      if (!executeGitCommand._gitReposChecked) executeGitCommand._gitReposChecked = new Set();
+      executeGitCommand._gitReposChecked.add(workingDir);
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message,
+        stdout: '',
+        stderr: ''
+      };
+    }
+  }
+
+  // Check if already aborted
+  if (signal && signal.aborted) {
+    return {
+      success: false,
+      error: 'Operation was cancelled',
+      stdout: '',
+      stderr: ''
+    };
   }
 
   try {
@@ -394,8 +392,9 @@ async function gitCommit(message, cwd) {
   const workingDir = validateCwd(cwd);
 
   // Check if there's anything staged
+  // 'git diff --cached --quiet' exits 0 if there ARE staged changes, 1 if there are NOT
   const statusResult = await executeGitCommand(workingDir, ['diff', '--cached', '--quiet']);
-  if (statusResult.success) {
+  if (!statusResult.success) {
     return {
       success: false,
       error: 'No staged changes to commit. Use git_add first.'
@@ -451,7 +450,7 @@ async function gitCommit(message, cwd) {
         await fs.promises.rmdir(tmpDir);
       }
     } catch (error) {
-      log(`Failed to cleanup temp file: ${error.message}`, LOG_LEVELS.WARN);
+      // Silently ignore cleanup errors
     }
   }
 }
@@ -461,6 +460,20 @@ async function gitCommit(message, cwd) {
  */
 async function gitBranch(action, name, cwd) {
   const workingDir = validateCwd(cwd);
+
+  // Validate branch name if provided
+  if (name) {
+    if (typeof name !== 'string' || name.startsWith('-')) {
+      return { success: false, error: 'Invalid branch name: must not start with -' };
+    }
+    // Git branch name rules: no spaces, ~^:?*[\, no @{}, no consecutive dots, not empty
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._/\-]+$/.test(name)) {
+      return { success: false, error: 'Invalid branch name: contains forbidden characters' };
+    }
+    if (name.includes('..') || name.endsWith('.lock')) {
+      return { success: false, error: 'Invalid branch name: contains forbidden patterns' };
+    }
+  }
 
   switch (action) {
     case 'list': {
@@ -621,6 +634,13 @@ async function gitLog(count, cwd) {
 async function gitStash(action, cwd, index = null) {
   const workingDir = validateCwd(cwd);
 
+  // Validate stash index if provided
+  if (index !== null) {
+    if (typeof index !== 'number' || index < 0 || !Number.isInteger(index)) {
+      return { success: false, error: `Invalid stash index: ${index}. Must be a non-negative integer.` };
+    }
+  }
+
   switch (action) {
     case 'save': {
       const result = await executeGitCommand(workingDir, ['stash', 'push']);
@@ -745,9 +765,6 @@ async function gitPull(remote = 'origin', branch = null, cwd) {
 
   // Pre-flight: check for uncommitted changes
   const statusResult = await executeGitCommand(workingDir, ['status', '--porcelain']);
-  if (statusResult.success && statusResult.stdout.trim()) {
-    log('Warning: uncommitted changes present before pull', LOG_LEVELS.WARN);
-  }
 
   const args = ['pull'];
   if (remote) {
@@ -773,6 +790,23 @@ async function gitPull(remote = 'origin', branch = null, cwd) {
  */
 async function gitRemote(action, name, url, cwd) {
   const workingDir = validateCwd(cwd);
+
+  // Validate remote name if provided
+  if (name) {
+    if (typeof name !== 'string' || name.startsWith('-')) {
+      return { success: false, error: 'Invalid remote name: must not start with -' };
+    }
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._\-]*$/.test(name)) {
+      return { success: false, error: 'Invalid remote name: contains forbidden characters' };
+    }
+  }
+
+  // Validate URL if provided
+  if (url) {
+    if (typeof url !== 'string' || url.startsWith('-')) {
+      return { success: false, error: 'Invalid remote URL: must not start with -' };
+    }
+  }
 
   switch (action) {
     case 'list': {
@@ -858,6 +892,23 @@ async function gitReset(mode, target, cwd) {
     };
   }
 
+  // Validate target to prevent git option injection
+  if (target) {
+    if (typeof target !== 'string' || target.startsWith('-')) {
+      return {
+        success: false,
+        error: 'Invalid target: must be a valid commit reference, not starting with -'
+      };
+    }
+    // Validate as commit-ish (alphanumeric, dots, slashes, hyphens)
+    if (!/^[a-zA-Z0-9._/\-]+$/.test(target)) {
+      return {
+        success: false,
+        error: 'Invalid target: contains forbidden characters'
+      };
+    }
+  }
+
   const args = ['reset'];
 
   if (mode === 'soft') {
@@ -887,6 +938,17 @@ async function gitReset(mode, target, cwd) {
  */
 async function gitTag(action, name, target, cwd, options = {}) {
   const workingDir = validateCwd(cwd);
+
+  // Validate tag name if provided
+  if (name) {
+    if (typeof name !== 'string' || name.startsWith('-')) {
+      return { success: false, error: 'Invalid tag name: must not start with -' };
+    }
+    // Git tag name rules: no spaces, ~^:?*[\, no @{}, no consecutive dots
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._/\-]*$/.test(name)) {
+      return { success: false, error: 'Invalid tag name: contains forbidden characters' };
+    }
+  }
 
   switch (action) {
     case 'list': {
@@ -1025,6 +1087,11 @@ async function gitCherryPick(commit, cwd, options = {}) {
     return { success: false, error: 'Commit hash is required' };
   }
 
+  // Validate commit to prevent option injection
+  if (commit.startsWith('-')) {
+    return { success: false, error: 'Invalid commit: must not start with -' };
+  }
+
   const args = ['cherry-pick'];
 
   if (options.noCommit) {
@@ -1086,6 +1153,11 @@ async function gitShow(commit, cwd, options = {}) {
     return { success: false, error: 'Commit hash is required' };
   }
 
+  // Validate commit to prevent option injection
+  if (commit.startsWith('-')) {
+    return { success: false, error: 'Invalid commit: must not start with -' };
+  }
+
   const args = ['show'];
 
   if (options.stat) {
@@ -1098,7 +1170,9 @@ async function gitShow(commit, cwd, options = {}) {
 
   if (options.file) {
     const validatedFile = validateFilePath(options.file, workingDir);
-    args.push(`${commit}:${validatedFile}`);
+    // Git tree notation requires relative paths, not absolute
+    const relativeFile = path.relative(workingDir, validatedFile);
+    args.push(`${commit}:${relativeFile}`);
   } else {
     args.push(commit);
   }
@@ -1240,8 +1314,6 @@ function formatRemotes(remoteResult) {
 // ============================================================================
 
 module.exports = function(api) {
-  log('Extension loaded');
-
   // Register git_status tool
   api.registerTool({
     name: 'git_status',
@@ -2104,10 +2176,4 @@ module.exports = function(api) {
     }
   });
 
-  log('Registered 16 git tools:');
-  log('  - git_status, git_diff, git_add, git_commit');
-  log('  - git_branch, git_log, git_stash');
-  log('  - git_push, git_pull, git_remote');
-  log('  - git_reset, git_tag, git_rebase');
-  log('  - git_cherry_pick, git_blame, git_show');
 };

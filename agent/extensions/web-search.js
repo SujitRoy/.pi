@@ -28,16 +28,30 @@ const envPath = path.join(__dirname, '..', '..', '.env');
 if (fs.existsSync(envPath)) {
   const envContent = fs.readFileSync(envPath, 'utf8');
   envContent.split('\n').forEach(line => {
-    const [key, ...valueParts] = line.split('=');
-    if (key && valueParts.length > 0) {
-      const value = valueParts.join('=').trim();
-      if (key.trim() === 'SEARXNG_BASE_URL' && !process.env.SEARXNG_BASE_URL) {
-        process.env.SEARXNG_BASE_URL = value;
-      }
-      // Future enhancement: Add proxy support
-      // if (key.trim() === 'PROXY_URL' && !process.env.PROXY_URL) {
-      //   process.env.PROXY_URL = value;
-      // }
+    const trimmed = line.trim();
+    // Skip empty lines and comments
+    if (!trimmed || trimmed.startsWith('#')) return;
+
+    const eqIndex = trimmed.indexOf('=');
+    if (eqIndex === -1) return;
+
+    const key = trimmed.substring(0, eqIndex).trim();
+    let value = trimmed.substring(eqIndex + 1).trim();
+
+    // Strip surrounding quotes
+    if ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+
+    // Strip inline comments (not inside quotes)
+    const commentIndex = value.indexOf(' #');
+    if (commentIndex !== -1) {
+      value = value.substring(0, commentIndex).trim();
+    }
+
+    if (key === 'SEARXNG_BASE_URL' && !process.env.SEARXNG_BASE_URL) {
+      process.env.SEARXNG_BASE_URL = value;
     }
   });
 }
@@ -48,8 +62,20 @@ if (fs.existsSync(envPath)) {
 // };
 
 // SearXNG Configuration
+const SEARXNG_BASE = process.env.SEARXNG_BASE_URL || 'http://localhost:8080';
+
+// Validate SEARXNG_BASE_URL scheme
+try {
+  const parsedUrl = new URL(SEARXNG_BASE);
+  if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+    throw new Error(`Unsupported scheme: ${parsedUrl.protocol}`);
+  }
+} catch (error) {
+  throw new Error(`Invalid SEARXNG_BASE_URL "${SEARXNG_BASE}": ${error.message}`);
+}
+
 const SEARXNG_CONFIG = {
-  baseUrl: process.env.SEARXNG_BASE_URL || 'http://localhost:8080',
+  baseUrl: SEARXNG_BASE,
   defaultLanguage: 'en',
   maxResults: 8
 };
@@ -63,11 +89,12 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes TTL
  */
 function getCachedResult(cacheKey) {
   const cached = searchCache.get(cacheKey);
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return cached.data;
-  }
-  // Remove expired entry
   if (cached) {
+    const ttl = cached.ttl || CACHE_TTL; // Use per-entry TTL or default
+    if (Date.now() - cached.timestamp < ttl) {
+      return cached.data;
+    }
+    // Remove expired entry
     searchCache.delete(cacheKey);
   }
   return null;
@@ -81,10 +108,11 @@ function setCachedResult(cacheKey, data) {
     data,
     timestamp: Date.now()
   });
-  
-  // Clean up old entries periodically
-  if (searchCache.size > 50) { // Limit cache size
+
+  // Evict oldest entries when cache exceeds size limit
+  while (searchCache.size > 50) {
     const firstKey = searchCache.keys().next().value;
+    if (firstKey === undefined) break;
     searchCache.delete(firstKey);
   }
 }
@@ -100,24 +128,45 @@ function isBlockedInternalURL(url) {
   try {
     const parsed = new URL(url);
     const hostname = parsed.hostname.toLowerCase();
-    
+
+    // Block scheme-based attacks: file://, data://, javascript://
+    const protocol = parsed.protocol.toLowerCase();
+    if (!['http:', 'https:'].includes(protocol)) {
+      return true;
+    }
+
     // Block localhost, loopback, and internal IPs
-    const blockedHostnames = ['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]'];
+    const blockedHostnames = ['localhost', '0.0.0.0', '::1', '[::1]'];
     if (blockedHostnames.includes(hostname)) {
       return true;
     }
-    
+
+    // Block entire 127.0.0.0/8 loopback range (127.0.0.0 - 127.255.255.255)
+    if (/^127\./.test(hostname)) {
+      return true;
+    }
+
+    // Block octal/hex IP bypasses (0177.0.0.1, 0x7f.0.0.1)
+    if (/^0[0-7]+\./.test(hostname) || /^0x[0-9a-f]+\./i.test(hostname)) {
+      return true;
+    }
+
     // Block private IP ranges: 10.x.x.x, 172.16-31.x.x, 192.168.x.x
     const privateIPPattern = /^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|169\.254\.)/;
     if (privateIPPattern.test(hostname)) {
       return true;
     }
-    
+
+    // Block IPv6 link-local (fe80::/10) and unique local (fc00::/7, fd00::/8)
+    if (/^fe[89ab]/i.test(hostname) || /^f[c-d]/i.test(hostname)) {
+      return true;
+    }
+
     // Block .local and .internal TLDs
     if (hostname.endsWith('.local') || hostname.endsWith('.internal')) {
       return true;
     }
-    
+
     return false;
   } catch {
     return true; // Block invalid URLs
@@ -197,13 +246,18 @@ async function makeHttpRequest(url, method = 'GET', postData = null, options = {
       
       // Resolve relative URLs
       currentUrl = new URL(location, currentUrl).href;
-      
+
+      // Validate redirect scheme
+      const redirectProtocol = new URL(currentUrl).protocol.toLowerCase();
+      if (!['http:', 'https:'].includes(redirectProtocol)) {
+        throw new Error(`Redirect to unsupported scheme: ${redirectProtocol}`);
+      }
+
       // SSRF check on redirect target
       if (isBlockedInternalURL(currentUrl)) {
         throw new Error(`Redirect to internal URL blocked: ${currentUrl}`);
       }
-      
-      log(`Following redirect (${response.status}): ${currentUrl}`, LOG_LEVELS.DEBUG);
+
       continue;
     }
     
@@ -335,7 +389,8 @@ function extractTextFromHTML(html) {
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&apos;/g, "'")
-    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, code) => String.fromCodePoint(parseInt(code, 16)))
     // Clean up whitespace
     .replace(/[ \t]+/g, ' ')
     .replace(/\n\s*\n/g, '\n')
@@ -360,7 +415,6 @@ async function fetchSourceContent(url, options = {}) {
     const cacheKey = `content_${url}`;
     const cached = getCachedResult(cacheKey);
     if (cached) {
-      log('Using cached content for: ' + url, LOG_LEVELS.DEBUG);
       return cached;
     }
   }
@@ -402,7 +456,6 @@ async function fetchSourceContent(url, options = {}) {
     
     return result;
   } catch (error) {
-    log(`Failed to fetch source ${url}: ${error.message}`, LOG_LEVELS.ERROR);
     return { url, title: 'Fetch failed', description: '', excerpt: `Error: ${error.message}` };
   }
 }
@@ -534,11 +587,14 @@ function sortByRecency(results) {
   return results.sort((a, b) => {
     const dateA = a.publishedDate ? new Date(a.publishedDate).getTime() : 0;
     const dateB = b.publishedDate ? new Date(b.publishedDate).getTime() : 0;
+    // Treat NaN as 0 (undated)
+    const validA = Number.isFinite(dateA) ? dateA : 0;
+    const validB = Number.isFinite(dateB) ? dateB : 0;
     // Undated results go to the end
-    if (dateA === 0 && dateB === 0) return 0;
-    if (dateA === 0) return 1;
-    if (dateB === 0) return -1;
-    return dateB - dateA; // Newest first
+    if (validA === 0 && validB === 0) return 0;
+    if (validA === 0) return 1;
+    if (validB === 0) return -1;
+    return validB - validA; // Newest first
   });
 }
 
@@ -567,8 +623,8 @@ async function search(query, options = {}) {
     depth = 'standard'
   } = options;
 
-  // Create cache key
-  const cacheKey = `${query}_${language}_${category}_${maxResults}_${depth}`;
+  // Create cache key with structured prefix to avoid collisions
+  const cacheKey = `search|${query}|${language}|${category}|${maxResults}|${depth}`;
   const isTimeSensitive = needsRecentResults(query);
 
   // Try to get from cache first (skip for deep mode as it fetches external content)
@@ -576,7 +632,6 @@ async function search(query, options = {}) {
   if (depth !== 'deep' && !isTimeSensitive) {
     const cachedResult = getCachedResult(cacheKey);
     if (cachedResult) {
-      log('Returning cached result for: ' + query, LOG_LEVELS.DEBUG);
       return cachedResult;
     }
   }
@@ -667,7 +722,6 @@ async function search(query, options = {}) {
     
     return response;
   } catch (error) {
-    log('Search failed: ' + error.message, LOG_LEVELS.ERROR);
     const errorResponse = {
       results: [],
       suggestions: [],
@@ -678,12 +732,17 @@ async function search(query, options = {}) {
       queryType: detectQueryType(query),
       confidence: { score: 0, level: 'low', reasons: ['Search failed'], totalResults: 0, returnedCount: 0 }
     };
-    
-    // Cache error responses too (except for time-sensitive queries and deep mode)
+
+    // Only cache transient errors (network failures), not permanent errors (bad query)
+    // Use shorter TTL for errors to allow faster recovery
     if (depth !== 'deep' && !isTimeSensitive) {
-      setCachedResult(cacheKey, errorResponse);
+      searchCache.set(cacheKey, {
+        data: errorResponse,
+        timestamp: Date.now(),
+        ttl: 60 * 1000 // 1 minute TTL for errors
+      });
     }
-    
+
     return errorResponse;
   }
 }
@@ -795,8 +854,6 @@ function formatSearchResults(searchData, query, depth = 'standard') {
 // ============================================================================
 
 module.exports = function(api) {
-  log('[web-search] Extension loaded, SearXNG URL:', SEARXNG_CONFIG.baseUrl);
-
   // Register the web_search tool
   api.registerTool({
     name: 'web_search',
@@ -833,13 +890,10 @@ module.exports = function(api) {
       required: ['query']
     },
     execute: async (toolCallId, params, signal, onUpdate, ctx) => {
-      log('Tool called: web_search', LOG_LEVELS.DEBUG);
-
       const query = params?.query;
 
       if (!query || typeof query !== 'string' || query.trim() === '') {
         const errorText = `**Web Search Error**\n\nNo search query provided. Please provide a search query.`;
-        log('Error: No valid query', LOG_LEVELS.ERROR);
         return { content: [{ type: 'text', text: errorText }], isError: true };
       }
 
@@ -870,7 +924,6 @@ module.exports = function(api) {
         return { content: [{ type: 'text', text }] };
       } catch (error) {
         const errorText = `**Web Search Failed**\n\nAn unexpected error occurred.\n\n**Error:** ${error.message || 'Unknown error'}`;
-        log('Tool execution failed: ' + error.message, LOG_LEVELS.ERROR);
         return { content: [{ type: 'text', text: errorText }], isError: true };
       }
     }
@@ -905,13 +958,10 @@ module.exports = function(api) {
       required: ['url']
     },
     execute: async (toolCallId, params, signal, onUpdate, ctx) => {
-      log('Tool called: fetch_content', LOG_LEVELS.DEBUG);
-
       const url = params?.url;
 
       if (!url || typeof url !== 'string' || url.trim() === '') {
         const errorText = `**Fetch Content Error**\n\nNo URL provided. Please provide a URL to fetch.`;
-        log('Error: No URL', LOG_LEVELS.ERROR);
         return { content: [{ type: 'text', text: errorText }], isError: true };
       }
 
@@ -926,19 +976,16 @@ module.exports = function(api) {
         }
       } catch (error) {
         const errorText = `**Fetch Content Error**\n\nInvalid URL: ${url}\n\n**Details:** ${error.message}`;
-        log('Error: Invalid URL - ' + error.message, LOG_LEVELS.ERROR);
         return { content: [{ type: 'text', text: errorText }], isError: true };
       }
 
       // Check for internal/private URLs (SSRF protection)
       if (isBlockedInternalURL(cleanUrl)) {
         const errorText = `**Fetch Content Blocked**\n\nAccess to internal/private URLs is not allowed for security reasons.\n\n**URL:** ${cleanUrl}`;
-        log('Blocked: SSRF protection triggered for ' + cleanUrl, LOG_LEVELS.ERROR);
         return { content: [{ type: 'text', text: errorText }], isError: true };
       }
 
       try {
-        log('Fetching: ' + cleanUrl, LOG_LEVELS.DEBUG);
         const content = await fetchSourceContent(cleanUrl, {
           maxContentLength: params?.maxLength || 2000,
           useCache: true,
@@ -947,7 +994,6 @@ module.exports = function(api) {
 
         if (!content || content.title === 'Fetch failed') {
           const errorText = `**Fetch Content Failed**\n\nCould not extract content from: ${cleanUrl}\n\n**Details:** ${content?.excerpt || 'Unknown error'}`;
-          log('Failed to extract content: ' + (content?.excerpt || 'unknown'), LOG_LEVELS.WARN);
           return { content: [{ type: 'text', text: errorText }], isError: true };
         }
 
@@ -969,11 +1015,8 @@ module.exports = function(api) {
         return { content: [{ type: 'text', text: response }] };
       } catch (error) {
         const errorText = `**Fetch Content Failed**\n\nAn unexpected error occurred.\n\n**URL:** ${cleanUrl}\n**Error:** ${error.message || 'Unknown error'}`;
-        log('Unexpected error: ' + error.message, LOG_LEVELS.ERROR);
         return { content: [{ type: 'text', text: errorText }], isError: true };
       }
     }
   });
-
-  log('[web-search] Registered 2 tools: web_search, fetch_content');
 };
