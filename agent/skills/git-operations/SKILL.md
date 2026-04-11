@@ -31,6 +31,8 @@ The Pi agent has specialized git tools for all operations. Use these tools inste
 
 If a git tool fails, fall back to bash commands: `cd /path && git <command>`
 
+For web searches about git topics, use `web_search` tool only when you need current information about git hosting services, outages, or recent git feature announcements.
+
 ### Standard Workflow (Execute These Steps)
 
 1. **Check repository status**
@@ -243,19 +245,26 @@ Remember: EXECUTE these commands, don't just describe them. The user wants resul
 
 ### Troubleshooting Git Tool Issues
 
-If git tools fail with errors:
-1. First try using bash commands directly
-2. Check if repository path is correct
-3. Verify git is installed and working: `git --version`
-4. Check repository state: `cd /path && git status`
-5. Some git operations may fail if repository is in conflicted state
+**KNOWN BUG (2026-04-11):** All git tools fail with error: `Cannot destructure property 'stdout' of '(intermediate value)' as it is undefined`
 
-Common tool errors and workarounds:
-- `git_status` fails: Use `cd /path && git status`
-- `git_commit` fails: Use bash with `git commit -m "message"`
-- Tool timeout: Use bash with appropriate timeout
+**Immediate workaround:** Always use bash commands for git operations:
+- Instead of `git_status`: `cd /path && git status`
+- Instead of `git_commit`: `cd /path && git commit -m "message"`
+- Instead of `git_add`: `cd /path && git add <files>`
+- Instead of `git_log`: `cd /path && git log --oneline -n 10`
+- Instead of `git_push`: `cd /path && git push origin <branch>`
+
+**Git workflow with bash fallback:**
+1. `cd /path/to/repo && git status` - Check status
+2. `git add <files>` - Stage changes  
+3. `git diff --staged` - Review staged changes
+4. `git commit -m "type(scope): description"` - Commit
+5. `git log -1` - Verify commit
+6. `git push origin <branch>` - Push to remote
 
 Always verify the operation succeeded by checking status or log afterward.
+
+**Report this bug** in Pi agent git tool implementation.
 
 ### Tool Usage Examples
 

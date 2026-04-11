@@ -3,10 +3,36 @@ name: web-search
 description: Live web search using SearXNG API and URL content fetching for real-time information
 ---
 
+## When to Use Web Search
+
+Use `web_search` tool when:
+- Query requires current, real-time information (news, weather, stock prices, live scores)
+- User asks about events that happened recently or are ongoing
+- User provides a URL and wants content extracted (use `fetch_content`)
+- Query is about something you don't have training knowledge of
+
+Do NOT use web_search when:
+- The answer is general knowledge, programming concepts, or well-established facts
+- The query is about code, algorithms, architecture, or technical concepts you already know
+- The user is asking you to perform an action (commit code, review files, etc.)
+- The query is vague or ambiguous — ask for clarification first
+
+**Examples of when to search:**
+- "What's the weather in Tokyo?" → use `web_search`
+- "Who won the last Super Bowl?" → use `web_search`
+- "Latest Node.js security vulnerabilities" → use `web_search`
+- "Current price of Bitcoin" → use `web_search`
+
+**Examples of when NOT to search:**
+- "How do I write a for loop in Python?" → answer from knowledge
+- "What is OAuth?" → answer from knowledge
+- "Fix this bug in my code" → inspect and fix code
+- "Review this PR" → review code
+
 ## Available Tools
 
 ### 1. `web_search` - Search the Web
-- Use this skill when the user needs current, real-time information from the web.
+- Use ONLY for current, real-time information from the web.
 - Search using the SearXNG API endpoint.
 - Parse and return relevant search results with title, content, URL, and published date.
 - Categories: general, news, science, it, technology.

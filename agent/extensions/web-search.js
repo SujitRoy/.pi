@@ -203,7 +203,7 @@ async function makeHttpRequest(url, method = 'GET', postData = null, options = {
         throw new Error(`Redirect to internal URL blocked: ${currentUrl}`);
       }
       
-      console.log(`[web-search] Following redirect (${response.status}): ${currentUrl}`);
+      log(`Following redirect (${response.status}): ${currentUrl}`, LOG_LEVELS.DEBUG);
       continue;
     }
     
@@ -360,7 +360,7 @@ async function fetchSourceContent(url, options = {}) {
     const cacheKey = `content_${url}`;
     const cached = getCachedResult(cacheKey);
     if (cached) {
-      console.log('[web-search] Using cached content for:', url);
+      log('Using cached content for: ' + url, LOG_LEVELS.DEBUG);
       return cached;
     }
   }
@@ -402,7 +402,7 @@ async function fetchSourceContent(url, options = {}) {
     
     return result;
   } catch (error) {
-    console.error(`[web-search] Failed to fetch source ${url}:`, error.message);
+    log(`Failed to fetch source ${url}: ${error.message}`, LOG_LEVELS.ERROR);
     return { url, title: 'Fetch failed', description: '', excerpt: `Error: ${error.message}` };
   }
 }
@@ -461,19 +461,23 @@ function rerankWithDomainBoost(results, boostedDomains) {
  * Build confidence metadata for search results
  */
 function buildConfidence(results, query, queryType) {
-  const totalResults = results.numberOfResults || 0;
+  // Use actual returned results count, not API's total estimate
   const returnedCount = results.results?.length || 0;
+  const totalResults = results.numberOfResults || returnedCount; // Fallback to returned count
   const hasAnswers = results.answers?.length > 0;
   const hasSuggestions = results.suggestions?.length > 0;
 
   let score = 0;
   const reasons = [];
 
-  if (totalResults > 1000) { score += 0.3; reasons.push('Many sources found'); }
-  else if (totalResults > 100) { score += 0.2; reasons.push('Good number of sources'); }
-  else if (totalResults > 0) { score += 0.1; reasons.push('Few sources found'); }
+  // Score based on actual returned results (more reliable than API estimates)
+  if (returnedCount >= 5) { score += 0.3; reasons.push('Multiple sources found'); }
+  else if (returnedCount >= 3) { score += 0.2; reasons.push('Several sources found'); }
+  else if (returnedCount >= 1) { score += 0.1; reasons.push('Few sources found'); }
 
-  if (returnedCount > 0) { score += 0.2; }
+  // Bonus for API total count being high (indicates comprehensive search space)
+  if (totalResults > 1000 && returnedCount > 0) { score += 0.1; reasons.push('Large search space'); }
+
   if (hasAnswers) { score += 0.3; reasons.push('Direct answer available'); }
   if (hasSuggestions) { score += 0.1; reasons.push('Alternative queries suggested'); }
   if (queryType !== 'general') { score += 0.1; reasons.push(`Specific intent: ${queryType}`); }
@@ -572,7 +576,7 @@ async function search(query, options = {}) {
   if (depth !== 'deep' && !isTimeSensitive) {
     const cachedResult = getCachedResult(cacheKey);
     if (cachedResult) {
-      console.log('[web-search] Returning cached result for:', query);
+      log('Returning cached result for: ' + query, LOG_LEVELS.DEBUG);
       return cachedResult;
     }
   }
@@ -663,7 +667,7 @@ async function search(query, options = {}) {
     
     return response;
   } catch (error) {
-    console.error('[web-search] Search failed:', error.message);
+    log('Search failed: ' + error.message, LOG_LEVELS.ERROR);
     const errorResponse = {
       results: [],
       suggestions: [],
@@ -694,11 +698,12 @@ async function search(query, options = {}) {
 function formatWeatherResults(searchData, query) {
   const lines = [];
 
-  // Header
+  // Header - use actual results count
+  const actualCount = searchData.results.length;
   const confidenceLabel = searchData.confidence
     ? ` | Confidence: ${searchData.confidence.level} (${(searchData.confidence.score * 100).toFixed(0)}%)`
     : '';
-  lines.push(`**Weather Results for "${query}"**${confidenceLabel}`);
+  lines.push(`**Weather Results for "${query}"** (${actualCount} sources)${confidenceLabel}`);
   lines.push('');
 
   // Show top results with their full content snippets
@@ -749,7 +754,11 @@ function formatSearchResults(searchData, query, depth = 'standard') {
   const queryTypeLabel = searchData.queryType ? ` [${searchData.queryType}]` : '';
   const confidenceLabel = searchData.confidence ? ` | Confidence: ${searchData.confidence.level} (${(searchData.confidence.score * 100).toFixed(0)}%)` : '';
 
-  let response = `Found ${searchData.numberOfResults} result(s) for "${query}"${queryTypeLabel}${confidenceLabel}:\n\n`;
+  // Use actual results count, not API's total estimate (which is often 0)
+  const actualCount = searchData.results.length;
+  const totalCount = searchData.numberOfResults || actualCount;
+
+  let response = `Found ${actualCount} result(s) for "${query}"${queryTypeLabel}${confidenceLabel}:\n\n`;
 
   searchData.results.forEach((result, index) => {
     const boostBadge = result._domainBoosted ? ' ⭐' : '';
@@ -782,28 +791,11 @@ function formatSearchResults(searchData, query, depth = 'standard') {
 }
 
 // ============================================================================
-// Auto-Search Detection
-// ============================================================================
-
-/**
- * Detect if a message likely needs web search
- */
-function shouldAutoSearch(message) {
-  const searchKeywords = [
-    'weather', 'temperature', 'current', 'latest', 'recent', 'now', 'today',
-    'who won', 'what is happening', 'news', 'live', 'score', 'stock',
-    'price of', 'exchange rate', 'election', 'result', 'results',
-    'how to', 'tutorial', 'guide'
-  ];
-  return searchKeywords.some(keyword => message.toLowerCase().includes(keyword));
-}
-
-// ============================================================================
 // PI Agent Extension Factory
 // ============================================================================
 
 module.exports = function(api) {
-  console.log('[web-search] Extension loaded, SearXNG URL:', SEARXNG_CONFIG.baseUrl);
+  log('[web-search] Extension loaded, SearXNG URL:', SEARXNG_CONFIG.baseUrl);
 
   // Register the web_search tool
   api.registerTool({
@@ -841,18 +833,13 @@ module.exports = function(api) {
       required: ['query']
     },
     execute: async (toolCallId, params, signal, onUpdate, ctx) => {
-      console.log('[web-search] Tool called with params:', JSON.stringify(params, null, 2));
+      log('Tool called: web_search', LOG_LEVELS.DEBUG);
 
       const query = params?.query;
 
-      console.log('[web-search] Extracted query:', query);
-
       if (!query || typeof query !== 'string' || query.trim() === '') {
-        const errorText = `⚠️ **Web Search Error**\n\n` +
-          `No search query provided. Please provide a search query.\n\n` +
-          `**Received:** ${JSON.stringify(params)}\n\n` +
-          `**Example:** web_search({ query: "Noida weather forecast" })`;
-        console.error('[web-search] Error: No valid query');
+        const errorText = `**Web Search Error**\n\nNo search query provided. Please provide a search query.`;
+        log('Error: No valid query', LOG_LEVELS.ERROR);
         return { content: [{ type: 'text', text: errorText }], isError: true };
       }
 
@@ -866,11 +853,7 @@ module.exports = function(api) {
 
         // Handle connection/network errors
         if (results.hasErrors && results.error) {
-          const errorText = `⚠️ **Web Search Unavailable**\n\n` +
-            `The search engine could not be reached. Please try again later.\n\n` +
-            `**Details:** ${results.error}\n` +
-            `**SearXNG URL:** ${SEARXNG_CONFIG.baseUrl}\n\n` +
-            `*Tip: Verify your SearXNG instance is running and accessible.*`;
+          const errorText = `**Web Search Unavailable**\n\nThe search engine could not be reached. Please try again later.\n\n**Details:** ${results.error}\n**SearXNG URL:** ${SEARXNG_CONFIG.baseUrl}`;
           return { content: [{ type: 'text', text: errorText }], isError: true };
         }
 
@@ -886,10 +869,8 @@ module.exports = function(api) {
         const text = formatSearchResults(results, query, params?.depth || 'standard');
         return { content: [{ type: 'text', text }] };
       } catch (error) {
-        const errorText = `⚠️ **Web Search Failed**\n\n` +
-          `An unexpected error occurred while searching.\n\n` +
-          `**Error:** ${error.message || 'Unknown error'}`;
-        console.error('[web-search] Tool execution failed:', error);
+        const errorText = `**Web Search Failed**\n\nAn unexpected error occurred.\n\n**Error:** ${error.message || 'Unknown error'}`;
+        log('Tool execution failed: ' + error.message, LOG_LEVELS.ERROR);
         return { content: [{ type: 'text', text: errorText }], isError: true };
       }
     }
@@ -924,15 +905,13 @@ module.exports = function(api) {
       required: ['url']
     },
     execute: async (toolCallId, params, signal, onUpdate, ctx) => {
-      console.log('[web-search] fetch_content called with params:', JSON.stringify(params, null, 2));
+      log('Tool called: fetch_content', LOG_LEVELS.DEBUG);
 
       const url = params?.url;
 
       if (!url || typeof url !== 'string' || url.trim() === '') {
-        const errorText = `⚠️ **Fetch Content Error**\n\n` +
-          `No URL provided. Please provide a URL to fetch.\n\n` +
-          `**Example:** fetch_content({ url: "https://example.com/article" })`;
-        console.error('[web-search] fetch_content error: No URL');
+        const errorText = `**Fetch Content Error**\n\nNo URL provided. Please provide a URL to fetch.`;
+        log('Error: No URL', LOG_LEVELS.ERROR);
         return { content: [{ type: 'text', text: errorText }], isError: true };
       }
 
@@ -946,26 +925,20 @@ module.exports = function(api) {
           throw new Error('Only HTTP/HTTPS URLs are supported');
         }
       } catch (error) {
-        const errorText = `⚠️ **Fetch Content Error**\n\n` +
-          `Invalid URL: ${url}\n\n` +
-          `**Details:** ${error.message}\n\n` +
-          `**Example:** fetch_content({ url: "https://example.com/article" })`;
-        console.error('[web-search] fetch_content error: Invalid URL', error.message);
+        const errorText = `**Fetch Content Error**\n\nInvalid URL: ${url}\n\n**Details:** ${error.message}`;
+        log('Error: Invalid URL - ' + error.message, LOG_LEVELS.ERROR);
         return { content: [{ type: 'text', text: errorText }], isError: true };
       }
 
       // Check for internal/private URLs (SSRF protection)
       if (isBlockedInternalURL(cleanUrl)) {
-        const errorText = `⚠️ **Fetch Content Blocked**\n\n` +
-          `Access to internal/private URLs is not allowed for security reasons.\n\n` +
-          `**URL:** ${cleanUrl}\n\n` +
-          `*This URL appears to target a private or internal network.*`;
-        console.error('[web-search] fetch_content blocked: SSRF protection triggered');
+        const errorText = `**Fetch Content Blocked**\n\nAccess to internal/private URLs is not allowed for security reasons.\n\n**URL:** ${cleanUrl}`;
+        log('Blocked: SSRF protection triggered for ' + cleanUrl, LOG_LEVELS.ERROR);
         return { content: [{ type: 'text', text: errorText }], isError: true };
       }
 
       try {
-        console.log('[web-search] Fetching content from:', cleanUrl);
+        log('Fetching: ' + cleanUrl, LOG_LEVELS.DEBUG);
         const content = await fetchSourceContent(cleanUrl, {
           maxContentLength: params?.maxLength || 2000,
           useCache: true,
@@ -973,80 +946,34 @@ module.exports = function(api) {
         });
 
         if (!content || content.title === 'Fetch failed') {
-          const errorText = `⚠️ **Fetch Content Failed**\n\n` +
-            `Could not extract content from: ${cleanUrl}\n\n` +
-            `**Details:** ${content?.excerpt || 'Unknown error'}\n\n` +
-            `*Tip: The page may require JavaScript, authentication, or may not be HTML content.*`;
-          console.error('[web-search] fetch_content failed:', content?.excerpt);
+          const errorText = `**Fetch Content Failed**\n\nCould not extract content from: ${cleanUrl}\n\n**Details:** ${content?.excerpt || 'Unknown error'}`;
+          log('Failed to extract content: ' + (content?.excerpt || 'unknown'), LOG_LEVELS.WARN);
           return { content: [{ type: 'text', text: errorText }], isError: true };
         }
 
         // Format the response
-        let response = `## 📄 ${content.title}\n\n`;
+        let response = `## ${content.title}\n\n`;
         response += `**Source:** ${content.url}\n\n`;
         response += `---\n\n${content.excerpt}\n\n`;
-        response += `---\n`;
-        response += `*Content extracted successfully.*`;
+        response += `---\n*Content extracted successfully.*`;
 
         if (params?.prompt) {
-          response = `## 📄 Content from: ${content.title}\n\n`;
+          response = `## Content from: ${content.title}\n\n`;
           response += `**Source:** ${content.url}\n`;
           response += `**Your question:** ${params.prompt}\n\n`;
           response += `---\n\n`;
           response += `**Extracted Content:**\n\n${content.excerpt}\n\n`;
-          response += `---\n`;
-          response += `*Review the content above to answer your question.*`;
+          response += `---\n*Review the content above to answer your question.*`;
         }
 
         return { content: [{ type: 'text', text: response }] };
       } catch (error) {
-        const errorText = `⚠️ **Fetch Content Failed**\n\n` +
-          `An unexpected error occurred while fetching content.\n\n` +
-          `**URL:** ${cleanUrl}\n` +
-          `**Error:** ${error.message || 'Unknown error'}`;
-        console.error('[web-search] fetch_content unexpected error:', error);
+        const errorText = `**Fetch Content Failed**\n\nAn unexpected error occurred.\n\n**URL:** ${cleanUrl}\n**Error:** ${error.message || 'Unknown error'}`;
+        log('Unexpected error: ' + error.message, LOG_LEVELS.ERROR);
         return { content: [{ type: 'text', text: errorText }], isError: true };
       }
     }
   });
 
-  // Hook into user input to auto-trigger search when appropriate
-  api.on('input', async (event, ctx) => {
-    const message = event.text || '';
-
-    if (shouldAutoSearch(message) && message.length > 5) {
-      console.log('[web-search] Auto-triggering search for:', message);
-      try {
-        const results = await search(message, { depth: 'fast' });
-
-        // If search failed, let the original message through with an error note
-        if (results.hasErrors && results.error) {
-          console.error('[web-search] Auto-search failed:', results.error);
-          const errorMsg = `[Web search unavailable: ${results.error}]`;
-          return { action: 'transform', text: `${message}\n\n${errorMsg}` };
-        }
-
-        // If no results, let the agent handle it naturally
-        if (results.results.length === 0) {
-          console.log('[web-search] No results found');
-          const noResultsMsg = `[Web search returned no results for this query]`;
-          return { action: 'transform', text: `${message}\n\n${noResultsMsg}` };
-        }
-
-        const formatted = formatSearchResults(results, message, 'fast');
-        const enhancedMessage = `${message}\n\n[Web search results:]\n${formatted}`;
-        console.log('[web-search] Search results injected into context');
-
-        return { action: 'transform', text: enhancedMessage };
-      } catch (error) {
-        console.error('[web-search] Auto-search failed:', error.message);
-        // Add error context so agent knows search didn't work
-        const errorMsg = `[Web search service error: ${error.message}]`;
-        return { action: 'transform', text: `${message}\n\n${errorMsg}` };
-      }
-    }
-
-    // Let the message continue unchanged
-    return { action: 'continue' };
-  });
+  log('[web-search] Registered 2 tools: web_search, fetch_content');
 };
