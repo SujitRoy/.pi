@@ -210,7 +210,7 @@ async function executeGitCommand(cwd, args, options = {}) {
       stderr: result.stderr.trim()
     };
   } catch (error) {
-    // Preserve full error information
+    // Preserve useful error information without leaking internal stack traces
     return {
       success: false,
       error: error.message,
@@ -218,8 +218,7 @@ async function executeGitCommand(cwd, args, options = {}) {
       stderr: error.stderr?.trim() || '',
       exitCode: error.exitCode || error.code,
       signal: error.signal,
-      killed: error.killed,
-      originalError: error
+      killed: error.killed
     };
   }
 }
@@ -392,12 +391,21 @@ async function gitCommit(message, cwd) {
   const workingDir = validateCwd(cwd);
 
   // Check if there's anything staged
-  // 'git diff --cached --quiet' exits 0 if there ARE staged changes, 1 if there are NOT
+  // 'git diff --cached --quiet' exits 0 if NO staged changes (clean), 1 if THERE ARE staged changes
   const statusResult = await executeGitCommand(workingDir, ['diff', '--cached', '--quiet']);
-  if (!statusResult.success) {
+  // exitCode 1 means diff found (staged changes exist) -> proceed with commit
+  // exitCode 0 (success) means no diff -> nothing staged, reject
+  if (statusResult.success) {
     return {
       success: false,
       error: 'No staged changes to commit. Use git_add first.'
+    };
+  }
+  // Also reject if exit code > 1 (actual error, not just "no changes")
+  if (statusResult.exitCode !== 1) {
+    return {
+      success: false,
+      error: statusResult.error || 'Failed to check staged changes'
     };
   }
 
@@ -441,16 +449,20 @@ async function gitCommit(message, cwd) {
       isDetailed: message.includes('\n')
     };
   } finally {
-    // Clean up temp file with proper error handling
-    try {
-      if (tmpFile) {
+    // Clean up temp file and directory
+    if (tmpFile) {
+      try {
         await fs.promises.unlink(tmpFile);
-        // Clean up temp directory
-        const tmpDir = path.dirname(tmpFile);
-        await fs.promises.rmdir(tmpDir);
+      } catch (error) {
+        console.error(`[git-tools] Failed to remove temp file ${tmpFile}: ${error.message}`);
       }
-    } catch (error) {
-      // Silently ignore cleanup errors
+      // Clean up temp directory (use recursive removal for safety)
+      const tmpDir = path.dirname(tmpFile);
+      try {
+        await fs.promises.rm(tmpDir, { recursive: true, force: true });
+      } catch (error) {
+        console.error(`[git-tools] Failed to remove temp directory ${tmpDir}: ${error.message}`);
+      }
     }
   }
 }
@@ -505,11 +517,13 @@ async function gitBranch(action, name, cwd) {
         return { success: false, error: `Branch '${name}' already exists` };
       }
 
-      const result = await executeGitCommand(workingDir, ['checkout', '-b', name]);
+      // Create branch only without switching (use 'git branch', not 'checkout -b')
+      const result = await executeGitCommand(workingDir, ['branch', name]);
       return {
         success: result.success,
         error: result.success ? null : result.stderr || result.error,
-        branch: name
+        branch: name,
+        message: result.success ? `Branch '${name}' created` : null
       };
     }
 
@@ -748,12 +762,17 @@ async function gitPush(remote = 'origin', branch = null, cwd, force = false) {
 
   const result = await executeGitCommand(workingDir, args);
 
+  const summary = result.stdout || result.stderr || '';
+  const forceWarning = force
+    ? '\n\n**WARNING: Force push executed (--force-with-lease)**\nThis can overwrite remote history. Verify the remote branch is in the expected state.'
+    : '';
+
   return {
     success: result.success,
     error: result.success ? null : result.stderr || result.error,
     remote,
     branch,
-    summary: result.stdout || result.stderr
+    summary: summary + forceWarning
   };
 }
 

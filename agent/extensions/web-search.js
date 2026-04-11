@@ -22,11 +22,17 @@
 
 const path = require('path');
 const fs = require('fs');
+const dns = require('dns');
+const util = require('util');
+const dnsLookup = util.promisify(dns.lookup);
 
 // Load .env file if it exists
 const envPath = path.join(__dirname, '..', '..', '.env');
+const SUPPORTED_ENV_KEYS = new Set(['SEARXNG_BASE_URL']);
+
 if (fs.existsSync(envPath)) {
   const envContent = fs.readFileSync(envPath, 'utf8');
+  const unrecognizedKeys = [];
   envContent.split('\n').forEach(line => {
     const trimmed = line.trim();
     // Skip empty lines and comments
@@ -52,8 +58,18 @@ if (fs.existsSync(envPath)) {
 
     if (key === 'SEARXNG_BASE_URL' && !process.env.SEARXNG_BASE_URL) {
       process.env.SEARXNG_BASE_URL = value;
+    } else if (SUPPORTED_ENV_KEYS.has(key)) {
+      // Already handled above
+    } else {
+      // Collect unrecognized keys for warning
+      unrecognizedKeys.push(key);
     }
   });
+
+  // Warn about unrecognized keys to help debugging
+  if (unrecognizedKeys.length > 0) {
+    console.warn(`[web-search] Unrecognized keys in .env file (only SEARXNG_BASE_URL is supported): ${unrecognizedKeys.join(', ')}`);
+  }
 }
 
 // Proxy configuration (to enable in future)
@@ -64,14 +80,48 @@ if (fs.existsSync(envPath)) {
 // SearXNG Configuration
 const SEARXNG_BASE = process.env.SEARXNG_BASE_URL || 'http://localhost:8080';
 
-// Validate SEARXNG_BASE_URL scheme
+// Validate SEARXNG_BASE_URL scheme AND IP address
 try {
   const parsedUrl = new URL(SEARXNG_BASE);
   if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
     throw new Error(`Unsupported scheme: ${parsedUrl.protocol}`);
   }
+  // Validate that the hostname is not an internal/private IP
+  const searxngHostname = parsedUrl.hostname;
+  if (_isInternalIP(searxngHostname)) {
+    throw new Error(`SEARXNG_BASE_URL must not point to an internal/private IP address: ${searxngHostname}`);
+  }
 } catch (error) {
+  if (error.message.includes('internal/private IP')) throw error;
   throw new Error(`Invalid SEARXNG_BASE_URL "${SEARXNG_BASE}": ${error.message}`);
+}
+
+/**
+ * Check if a hostname/IP string represents an internal/private address
+ * Used for both direct URL validation and SEARXNG_BASE_URL validation
+ * @private
+ */
+function _isInternalIP(hostname) {
+  const h = hostname.toLowerCase();
+  if (['localhost', '0.0.0.0', '::1', '[::1]'].includes(h)) return true;
+  if (/^127\./.test(h)) return true;
+  if (/^0[0-7]+\./.test(h) || /^0x[0-9a-f]+\./i.test(h)) return true;
+  if (/^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|169\.254\.)/.test(h)) return true;
+  if (/^fe[89ab]/i.test(h) || /^f[c-d]/i.test(h)) return true;
+  if (h.endsWith('.local') || h.endsWith('.internal')) return true;
+  return false;
+}
+
+/**
+ * Resolve a hostname to IP and check it is not internal/private (DNS rebinding protection)
+ */
+async function isSafeHostname(hostname) {
+  try {
+    const { address } = await dnsLookup(hostname);
+    return !_isInternalIP(address);
+  } catch {
+    return false;
+  }
 }
 
 const SEARXNG_CONFIG = {
@@ -110,10 +160,12 @@ function setCachedResult(cacheKey, data) {
   });
 
   // Evict oldest entries when cache exceeds size limit
-  while (searchCache.size > 50) {
-    const firstKey = searchCache.keys().next().value;
-    if (firstKey === undefined) break;
-    searchCache.delete(firstKey);
+  // Use insertion-order: Map guarantees iteration order, delete first N entries
+  let toRemove = searchCache.size - 50;
+  for (const key of searchCache.keys()) {
+    if (toRemove <= 0) break;
+    searchCache.delete(key);
+    toRemove--;
   }
 }
 
@@ -135,39 +187,7 @@ function isBlockedInternalURL(url) {
       return true;
     }
 
-    // Block localhost, loopback, and internal IPs
-    const blockedHostnames = ['localhost', '0.0.0.0', '::1', '[::1]'];
-    if (blockedHostnames.includes(hostname)) {
-      return true;
-    }
-
-    // Block entire 127.0.0.0/8 loopback range (127.0.0.0 - 127.255.255.255)
-    if (/^127\./.test(hostname)) {
-      return true;
-    }
-
-    // Block octal/hex IP bypasses (0177.0.0.1, 0x7f.0.0.1)
-    if (/^0[0-7]+\./.test(hostname) || /^0x[0-9a-f]+\./i.test(hostname)) {
-      return true;
-    }
-
-    // Block private IP ranges: 10.x.x.x, 172.16-31.x.x, 192.168.x.x
-    const privateIPPattern = /^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|169\.254\.)/;
-    if (privateIPPattern.test(hostname)) {
-      return true;
-    }
-
-    // Block IPv6 link-local (fe80::/10) and unique local (fc00::/7, fd00::/8)
-    if (/^fe[89ab]/i.test(hostname) || /^f[c-d]/i.test(hostname)) {
-      return true;
-    }
-
-    // Block .local and .internal TLDs
-    if (hostname.endsWith('.local') || hostname.endsWith('.internal')) {
-      return true;
-    }
-
-    return false;
+    return _isInternalIP(hostname);
   } catch {
     return true; // Block invalid URLs
   }
@@ -217,33 +237,49 @@ async function makeHttpRequest(url, method = 'GET', postData = null, options = {
   }
 
   const timeoutMs = options.timeout || 15000;
-  
+
   // Follow redirects manually for better control
   let currentUrl = url;
   let redirectCount = 0;
-  
+  let currentMethod = method;
+  let currentBody = body;
+
   while (true) {
+    // DNS Rebinding protection: resolve hostname and verify IP before each fetch
+    try {
+      const parsedUrl = new URL(currentUrl);
+      const safe = await isSafeHostname(parsedUrl.hostname);
+      if (!safe) {
+        throw new Error(`DNS resolution indicates unsafe/internal hostname: ${parsedUrl.hostname}`);
+      }
+    } catch (error) {
+      if (error.message.includes('DNS resolution') || error.message.includes('unsafe/internal')) {
+        throw error;
+      }
+      // URL parse errors are caught below
+    }
+
     const response = await fetch(currentUrl, {
-      method,
+      method: currentMethod,
       headers,
-      body,
+      body: currentMethod === 'GET' ? null : currentBody,
       redirect: 'manual', // Handle redirects manually
       signal: AbortSignal.timeout(timeoutMs)
     });
-    
+
     // Handle redirects (301, 302, 303, 307, 308)
     if ([301, 302, 303, 307, 308].includes(response.status)) {
       redirectCount++;
-      
+
       if (redirectCount > maxRedirects) {
         throw new Error(`Too many redirects (max: ${maxRedirects})`);
       }
-      
+
       const location = response.headers.get('location');
       if (!location) {
         throw new Error(`Redirect response without Location header`);
       }
-      
+
       // Resolve relative URLs
       currentUrl = new URL(location, currentUrl).href;
 
@@ -256,6 +292,12 @@ async function makeHttpRequest(url, method = 'GET', postData = null, options = {
       // SSRF check on redirect target
       if (isBlockedInternalURL(currentUrl)) {
         throw new Error(`Redirect to internal URL blocked: ${currentUrl}`);
+      }
+
+      // Per HTTP spec: 301/302/303 must convert to GET (drop body); only 307/308 preserve method
+      if (response.status === 301 || response.status === 302 || response.status === 303) {
+        currentMethod = 'GET';
+        currentBody = null;
       }
 
       continue;
@@ -360,27 +402,41 @@ function detectQueryType(query) {
  * Uses a robust approach without external dependencies
  */
 function extractTextFromHTML(html) {
-  // Remove script, style, noscript, svg content entirely
-  let text = html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
-    .replace(/<svg[\s\S]*?<\/svg>/gi, ' ');
+  let text = html;
 
-  // Extract meaningful content from structural elements
+  // Remove script, style, noscript, svg content entirely (handle nested/malformed tags)
   text = text
-    // Convert block elements to newlines
-    .replace(/<(?:p|div|article|section|header|footer|main|li|tr|h[1-6])[^>]*>/gi, '\n')
-    .replace(/<\/(?:p|div|article|section|header|footer|main|li|tr|h[1-6])>/gi, '\n')
-    // Handle line breaks
-    .replace(/<(?:br|hr)[^>]*\/?>/gi, '\n')
+    .replace(/<script[\s\S]*?<\/script[\s>]/gi, ' ')
+    .replace(/<script[\s\S]*$/gi, ' ')  // unclosed script
+    .replace(/<style[\s\S]*?<\/style[\s>]/gi, ' ')
+    .replace(/<style[\s\S]*$/gi, ' ')    // unclosed style
+    .replace(/<noscript[\s\S]*?<\/noscript[\s>]/gi, ' ')
+    .replace(/<noscript[\s\S]*$/gi, ' ')  // unclosed noscript
+    .replace(/<svg[\s\S]*?<\/svg[\s>]/gi, ' ')
+    .replace(/<svg[\s\S]*$/gi, ' ');      // unclosed svg
+
+  // Remove HTML comments
+  text = text.replace(/<!--[\s\S]*?-->/g, ' ');
+  text = text.replace(/<!--[\s\S]*$/g, ' '); // unclosed comment
+
+  // Remove CDATA sections
+  text = text.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, ' ');
+
+  // Convert block elements to newlines
+  text = text
+    .replace(/<(p|div|article|section|header|footer|main|li|tr|h[1-6]|br|hr|blockquote|pre|table|ul|ol|dl|thead|tbody|tfoot|td|th|dt|dd|form|fieldset|details|summary|figure|figcaption|aside|nav)[^>]*\/?>/gi, '\n')
+    .replace(/<\/(p|div|article|section|header|footer|main|li|tr|h[1-6]|blockquote|pre|table|ul|ol|dl|thead|tbody|tfoot|td|th|dt|dd|form|fieldset|details|summary|figure|figcaption|aside|nav)[^>]*>/gi, '\n')
+    // Handle self-closing br/hr
+    .replace(/<(br|hr)\s*\/?>/gi, '\n')
     // Handle links: keep text, add URL
-    .replace(/<a[^>]+href=["']([^"']+)["'][^>]*>([^<]*)<\/a>/gi, '$2 ($1)')
+    .replace(/<a[^>]+href=["']([^"']*)["'][^>]*>([^<]*(?:<(?!\/a>)[^<]*)*)<\/a>/gi, '$2 ($1)')
+    .replace(/<a[^>]+href=(\S+)[^>]*>([^<]*(?:<(?!\/a>)[^<]*)*)<\/a>/gi, '$2 ($1)')
     // Handle images: keep alt text
     .replace(/<img[^>]+alt=["']([^"']*)["'][^>]*\/?>/gi, ' [img: $1] ')
     .replace(/<img[^>]*\/?>/gi, ' ')
     // Remove all remaining HTML tags
     .replace(/<[^>]+>/g, ' ')
+    .replace(/<[^>]*$/g, ' ') // unclosed tag
     // Decode common HTML entities
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
@@ -389,6 +445,10 @@ function extractTextFromHTML(html) {
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&apos;/g, "'")
+    .replace(/&raquo;/g, '"')
+    .replace(/&laquo;/g, '"')
+    .replace(/&mdash;/g, '--')
+    .replace(/&ndash;/g, '-')
     .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
     .replace(/&#x([0-9a-fA-F]+);/g, (_, code) => String.fromCodePoint(parseInt(code, 16)))
     // Clean up whitespace
@@ -412,7 +472,7 @@ async function fetchSourceContent(url, options = {}) {
   
   // Check cache first
   if (useCache) {
-    const cacheKey = `content_${url}`;
+    const cacheKey = `ws:content:${url}`;
     const cached = getCachedResult(cacheKey);
     if (cached) {
       return cached;
@@ -450,7 +510,7 @@ async function fetchSourceContent(url, options = {}) {
     
     // Cache the result
     if (useCache) {
-      const cacheKey = `content_${url}`;
+      const cacheKey = `ws:content:${url}`;
       setCachedResult(cacheKey, result);
     }
     
@@ -476,10 +536,14 @@ async function fetchTopSources(results, limit = 3) {
     const batchResults = await Promise.allSettled(batchPromises);
     
     batchResults.forEach((result, j) => {
-      const originalUrl = batch[j];
+      const sourceInfo = batch[j];
+      const fetchedContent = result.status === 'fulfilled'
+        ? result.value
+        : { url: sourceInfo.url, title: 'Fetch failed', excerpt: result.reason?.message || 'Unknown error' };
       fetched.push({
-        ...originalUrl,
-        fetchedContent: result.status === 'fulfilled' ? result.value : { url: originalUrl.url, title: 'Fetch failed', excerpt: result.reason?.message || 'Unknown error' }
+        url: sourceInfo.url,
+        title: sourceInfo.title,
+        fetchedContent
       });
     });
   }
@@ -624,7 +688,7 @@ async function search(query, options = {}) {
   } = options;
 
   // Create cache key with structured prefix to avoid collisions
-  const cacheKey = `search|${query}|${language}|${category}|${maxResults}|${depth}`;
+  const cacheKey = `ws:search:${query}|${language}|${category}|${maxResults}|${depth}`;
   const isTimeSensitive = needsRecentResults(query);
 
   // Try to get from cache first (skip for deep mode as it fetches external content)
