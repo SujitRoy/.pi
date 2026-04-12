@@ -21,7 +21,6 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import { execSync } from "child_process";
 import * as path from "path";
-import * as fs from "fs";
 
 /** Minimal Component interface (mirrors pi-tui Component) */
 interface Component {
@@ -44,7 +43,6 @@ const SHOW_SESSION_NAME = true;
 const SHOW_TURNS = true;
 const SHOW_EXTENSION_STATUSES = true;
 const SHOW_THINKING_LEVEL = true;
-const SETTINGS_PATH = path.join(process.env.HOME || "", ".pi", "agent", "settings.json");
 
 // ============================================================================
 // Shared state (updated by event handlers, read by footer render)
@@ -106,19 +104,8 @@ let currentTheme: Theme | null = null;
 // Footer data reference (set by footer factory)
 let currentFooterData: ReadonlyFooterDataProvider | null = null;
 
-// ============================================================================
-// Settings Reader
-// ============================================================================
-
-function getThinkingLevel(): string {
-  try {
-    const raw = fs.readFileSync(SETTINGS_PATH, "utf8");
-    const settings = JSON.parse(raw);
-    return settings.defaultThinkingLevel || "off";
-  } catch {
-    return "off";
-  }
-}
+// API reference (set by extension entry point, used for getThinkingLevel)
+let currentAPI: ExtensionAPI | null = null;
 
 // ============================================================================
 // Git Helpers
@@ -290,7 +277,18 @@ function refreshState(ctx: ExtensionContext) {
   state.modelName = ctx.model?.id || "no-model";
 
   state.sessionName = SHOW_SESSION_NAME ? (ctx.sessionManager.getSessionName() ?? null) : null;
-  state.thinkingLevel = SHOW_THINKING_LEVEL ? getThinkingLevel() : "off";
+  
+  // Use ExtensionAPI to get thinking level
+  if (SHOW_THINKING_LEVEL && currentAPI) {
+    try {
+      state.thinkingLevel = currentAPI.getThinkingLevel();
+    } catch {
+      state.thinkingLevel = "off";
+    }
+  } else {
+    state.thinkingLevel = "off";
+  }
+  
   state.hasData = true;
 }
 
@@ -450,6 +448,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   function setupFooter(ctx: ExtensionContext) {
+    currentAPI = pi;
     refreshState(ctx);
     (ctx.ui as any).setFooter(
       (_tui: unknown, theme: Theme, footerData: ReadonlyFooterDataProvider) => {
@@ -458,7 +457,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         return createFooterComponent();
       },
     );
-    
+
     // Add keyboard handler for Shift+Tab to cycle thinking levels
     if ((ctx.ui as any).onInput) {
       (ctx.ui as any).onInput((key: string) => {
@@ -476,28 +475,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
    * Cycle through thinking levels: off -> minimal -> low -> medium -> high -> xhigh -> off
    */
   function cycleThinkingLevel(ctx: ExtensionContext) {
-    const currentLevel = getThinkingLevel();
+    if (!currentAPI) return;
+    
+    const currentLevel = currentAPI.getThinkingLevel();
     const levels = ["off", "minimal", "low", "medium", "high", "xhigh"];
     const currentIndex = levels.indexOf(currentLevel);
     const nextIndex = (currentIndex + 1) % levels.length;
     const newLevel = levels[nextIndex];
-    
-    // Update the settings file
+
+    // Update thinking level via ExtensionAPI
     try {
-      // Create directory if it doesn't exist
-      const dir = path.dirname(SETTINGS_PATH);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-      
-      let settings = {};
-      if (fs.existsSync(SETTINGS_PATH)) {
-        const raw = fs.readFileSync(SETTINGS_PATH, "utf8");
-        settings = JSON.parse(raw);
-      }
-      
-      settings.defaultThinkingLevel = newLevel;
-      fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+      currentAPI.setThinkingLevel(newLevel);
       
       // Update the state and refresh the display
       state.thinkingLevel = newLevel;
@@ -524,6 +512,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     (ctx.ui as any).setFooter(undefined);
     currentTheme = null;
     currentFooterData = null;
+    currentAPI = null;
   }
 
   pi.on("session_start", async (_event: any, ctx: ExtensionContext) => {
