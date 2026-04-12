@@ -64,9 +64,6 @@ interface FooterState {
   contextPercent: number | null;
   contextTokens: number | null;
   contextWindow: number;
-  modelName: string;
-  thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "n/a";
-  supportsThinking: boolean;
   sessionName: string | null;
   isCompacting: boolean;
   hasData: boolean;
@@ -89,9 +86,6 @@ const state: FooterState = {
   contextPercent: null,
   contextTokens: null,
   contextWindow: 0,
-  modelName: "no-model",
-  thinkingLevel: "off",
-  supportsThinking: false,
   sessionName: null,
   isCompacting: false,
   hasData: false,
@@ -217,7 +211,7 @@ function sanitizeStatusText(text: string): string {
 // State Refresher
 // ============================================================================
 
-function refreshState(ctx: ExtensionContext, api: ExtensionAPI) {
+function refreshState(ctx: ExtensionContext) {
   state.cwd = ctx.cwd;
   state.branch = getGitBranch(ctx.cwd);
   const stats = getWorkingTreeStats(ctx.cwd);
@@ -255,18 +249,6 @@ function refreshState(ctx: ExtensionContext, api: ExtensionAPI) {
   state.contextTokens = usage?.tokens ?? null;
   state.contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
 
-  state.modelName = ctx.model?.id || "no-model";
-  state.supportsThinking = !!(ctx.model as any)?.reasoning;
-  if (state.supportsThinking) {
-    try {
-      state.thinkingLevel = api.getThinkingLevel();
-    } catch {
-      state.thinkingLevel = "off";
-    }
-  } else {
-    state.thinkingLevel = "n/a";
-  }
-
   state.sessionName = SHOW_SESSION_NAME ? (ctx.sessionManager.getSessionName() ?? null) : null;
   state.hasData = true;
 }
@@ -287,17 +269,6 @@ function createFooterComponent(): Component {
       const success = (s: string) => t.fg("success", s);
       const warn = (s: string) => t.fg("warning", s);
       const err = (s: string) => t.fg("error", s);
-      const thinkingClr = (s: string) => {
-        const m: Record<string, (x: string) => string> = {
-          off: t.fg.bind(t, "thinkingOff"),
-          minimal: t.fg.bind(t, "thinkingMinimal"),
-          low: t.fg.bind(t, "thinkingLow"),
-          medium: t.fg.bind(t, "thinkingMedium"),
-          high: t.fg.bind(t, "thinkingHigh"),
-          xhigh: t.fg.bind(t, "thinkingXhigh"),
-        };
-        return (m[state.thinkingLevel] ?? muted)(s);
-      };
 
       const SEP = dim(" \u2502 "); // │
 
@@ -332,14 +303,6 @@ function createFooterComponent(): Component {
         segs.push(`${pctCol(`ctx:${pct.toFixed(1)}%`)}${dim(tokStr)}${w2}`);
       } else {
         segs.push(muted(`ctx:?/${formatTokens(state.contextWindow)}`));
-      }
-
-      // 4. Model + thinking level
-      if (state.supportsThinking && state.thinkingLevel !== "n/a") {
-        const tl = state.thinkingLevel === "off" ? "thinking:off" : `thinking:${state.thinkingLevel}`;
-        segs.push(`${muted(state.modelName)} ${thinkingClr(tl)}`);
-      } else {
-        segs.push(muted(state.modelName));
       }
 
       // 5. Session tokens
@@ -387,7 +350,8 @@ function createFooterComponent(): Component {
       if (SHOW_EXTENSION_STATUSES && currentFooterData) {
         const extStatuses = currentFooterData.getExtensionStatuses();
         if (extStatuses.size > 0) {
-          const sorted = Array.from(extStatuses.entries())
+          const entries = Array.from(extStatuses.entries()) as [string, string][];
+          const sorted = entries
             .sort(([a], [b]) => a.localeCompare(b))
             .map(([, text]) => sanitizeStatusText(text));
           const extLine = sorted.join(" ");
@@ -416,12 +380,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     if (refreshTimer) clearTimeout(refreshTimer);
     refreshTimer = setTimeout(() => {
       refreshTimer = null;
-      refreshState(ctx, pi);
+      refreshState(ctx);
     }, 300);
   }
 
   function setupFooter(ctx: ExtensionContext) {
-    refreshState(ctx, pi);
+    refreshState(ctx);
     (ctx.ui as any).setFooter(
       (_tui: unknown, theme: Theme, footerData: ReadonlyFooterDataProvider) => {
         currentTheme = theme;
@@ -441,7 +405,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   }
 
   pi.on("session_start", async (_event: any, ctx: ExtensionContext) => {
-    refreshState(ctx, pi);
+    refreshState(ctx);
     setupFooter(ctx);
   });
 
@@ -451,10 +415,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   pi.on("session_compact", async (_event: any, ctx: ExtensionContext) => {
     state.isCompacting = true;
-    refreshState(ctx, pi);
+    refreshState(ctx);
     setTimeout(() => {
       state.isCompacting = false;
-      refreshState(ctx, pi);
+      refreshState(ctx);
     }, 3000);
   });
 
@@ -466,7 +430,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   });
 
   pi.on("model_select", async (_event: any, ctx: ExtensionContext) => {
-    refreshState(ctx, pi);
+    refreshState(ctx);
   });
 
   pi.on("session_shutdown", async (_event: any, ctx: ExtensionContext) => {
@@ -475,7 +439,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
   pi.on("agent_start", async (_event: any, ctx: ExtensionContext) => {
     if (!state.hasData) {
-      refreshState(ctx, pi);
+      refreshState(ctx);
       setupFooter(ctx);
     }
   });
