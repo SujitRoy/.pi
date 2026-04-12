@@ -96,7 +96,6 @@ function buildSummary(ctx: ExtensionContext, startTime: number): string {
   let totalCacheRead = 0;
   let totalCacheWrite = 0;
   let totalCost = 0;
-  let toolCalls = 0;
   let userMessages = 0;
 
   for (const entry of entries) {
@@ -111,8 +110,6 @@ function buildSummary(ctx: ExtensionContext, startTime: number): string {
       } else if (entry.message.role === "user") {
         userMessages++;
       }
-    } else if (entry.type === "tool_call") {
-      toolCalls++;
     }
   }
 
@@ -120,7 +117,6 @@ function buildSummary(ctx: ExtensionContext, startTime: number): string {
 
   lines.push(`  \u{1F504}  Turns      ${turns}`);
   lines.push(`  \u{1F4E8}  Messages   ${userMessages} user, ${turns} assistant`);
-  if (toolCalls > 0) lines.push(`  \u{1F6E0}\uFE0F   Tool Calls ${toolCalls}`);
   lines.push("");
 
   // Token usage

@@ -500,62 +500,10 @@ function detectQueryType(query: string): string {
 // ============================================================================
 
 /**
- * Parse HTML and extract readable text content
- * Uses a robust approach without external dependencies
+ * Decode common HTML entities without external dependency
  */
-function extractTextFromHTML(html: string): string {
-  if (html.length > MAX_HTML_SIZE) {
-    html = html.slice(0, MAX_HTML_SIZE);
-  }
-
-  let text = html;
-
-  // Remove script, style, noscript, svg content entirely (handle nested/malformed tags)
-  text = text
-    .replace(/<script[\s\S]*?<\/script[\s>]/gi, " ")
-    .replace(/<script[\s\S]*$/gi, " ") // unclosed script
-    .replace(/<style[\s\S]*?<\/style[\s>]/gi, " ")
-    .replace(/<style[\s\S]*$/gi, " ") // unclosed style
-    .replace(/<noscript[\s\S]*?<\/noscript[\s>]/gi, " ")
-    .replace(/<noscript[\s\S]*$/gi, " ") // unclosed noscript
-    .replace(/<svg[\s\S]*?<\/svg[\s>]/gi, " ")
-    .replace(/<svg[\s\S]*$/gi, " "); // unclosed svg
-
-  // Remove HTML comments
-  text = text.replace(/<!--[\s\S]*?-->/g, " ");
-  text = text.replace(/<!--[\s\S]*$/g, " "); // unclosed comment
-
-  // Remove CDATA sections
-  text = text.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, " ");
-
-  // Convert block elements to newlines
-  text = text
-    .replace(
-      /<(p|div|article|section|header|footer|main|li|tr|h[1-6]|br|hr|blockquote|pre|table|ul|ol|dl|thead|tbody|tfoot|td|th|dt|dd|form|fieldset|details|summary|figure|figcaption|aside|nav)[^>]*\/?>/gi,
-      "\n",
-    )
-    .replace(
-      /<\/(p|div|article|section|header|footer|main|li|tr|h[1-6]|blockquote|pre|table|ul|ol|dl|thead|tbody|tfoot|td|th|dt|dd|form|fieldset|details|summary|figure|figcaption|aside|nav)[^>]*>/gi,
-      "\n",
-    )
-    // Handle self-closing br/hr
-    .replace(/<(br|hr)\s*\/?>/gi, "\n")
-    // Handle links: keep text, add URL
-    .replace(
-      /<a[^>]+href=["']([^"']*)["'][^>]*>([^<]*(?:<(?!\/a>)[^<]*)*)<\/a>/gi,
-      "$2 ($1)",
-    )
-    .replace(
-      /<a[^>]+href=(\S+)[^>]*>([^<]*(?:<(?!\/a>)[^<]*)*)<\/a>/gi,
-      "$2 ($1)",
-    )
-    // Handle images: keep alt text
-    .replace(/<img[^>]+alt=["']([^"']*)["'][^>]*\/?>/gi, " [img: $1] ")
-    .replace(/<img[^>]*\/?>/gi, " ")
-    // Remove all remaining HTML tags
-    .replace(/<[^>]+>/g, " ")
-    .replace(/<[^>]*$/g, " ") // unclosed tag
-    // Decode common HTML entities
+function decodeHTMLEntities(text: string): string {
+  return text
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
@@ -563,20 +511,107 @@ function extractTextFromHTML(html: string): string {
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&apos;/g, "'")
-    .replace(/&raquo;/g, '"')
-    .replace(/&laquo;/g, '"')
     .replace(/&mdash;/g, "--")
     .replace(/&ndash;/g, "-")
     .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
     .replace(/&#x([0-9a-fA-F]+);/g, (_, code) =>
       String.fromCodePoint(parseInt(code, 16)),
-    )
-    // Clean up whitespace
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n\s*\n/g, "\n")
-    .trim();
+    );
+}
 
-  return text;
+/**
+ * Parse HTML and extract readable text content
+ * Uses htmlparser2 for safe, ReDoS-free parsing
+ */
+function extractTextFromHTML(html: string): string {
+  if (html.length > MAX_HTML_SIZE) {
+    html = html.slice(0, MAX_HTML_SIZE);
+  }
+
+  try {
+    // Dynamic import to avoid hard dependency on htmlparser2 at build time
+    const { Parser } = require("htmlparser2");
+    const { DomHandler } = require("htmlparser2");
+
+    const textParts: string[] = [];
+    let linkText = "";
+    let linkHref = "";
+
+    const handler = new DomHandler((_error: Error | null, dom: any) => {
+      function walkNode(node: any) {
+        if (node.type === "comment") return;
+        if (node.type === "script" || node.type === "style") return;
+
+        if (node.type === "tag") {
+          if (node.name === "br" || node.name === "hr" || node.name === "p" ||
+              node.name === "div" || node.name === "tr" ||
+              node.name.startsWith("h")) {
+            textParts.push("\n");
+          }
+
+          if (node.name === "a") {
+            linkText = "";
+            linkHref = (node.attribs?.href) || "";
+          }
+
+          if (node.name === "img") {
+            const alt = node.attribs?.alt || "";
+            if (alt) textParts.push(`[img: ${alt}]`);
+          }
+        }
+
+        if (node.type === "text") {
+          const t = decodeHTMLEntities(node.data);
+          if (node.parent?.name === "a") {
+            linkText += t;
+          } else {
+            textParts.push(t);
+          }
+        }
+
+        if (node.children) {
+          for (const child of node.children) {
+            walkNode(child);
+          }
+        }
+
+        if (node.type === "tag" && node.name === "a") {
+          if (linkText && linkHref) {
+            textParts.push(`${linkText.trim()} (${linkHref})`);
+          } else if (linkText) {
+            textParts.push(linkText.trim());
+          }
+          textParts.push(" ");
+          linkText = "";
+          linkHref = "";
+        }
+      }
+
+      for (const child of dom) {
+        walkNode(child);
+      }
+    });
+
+    const parser = new Parser(handler, {
+      lowerCaseTagNames: true,
+      decodeEntities: false,
+    });
+
+    parser.write(html);
+    parser.end();
+
+    return textParts.join("")
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n\s*\n/g, "\n")
+      .trim();
+  } catch {
+    // Fallback: simple tag stripping if htmlparser2 unavailable
+    return html
+      .replace(/<[^>]*>/g, " ")
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n\s*\n/g, "\n")
+      .trim();
+  }
 }
 
 /**

@@ -149,7 +149,7 @@ export default async function (): Promise<void> {
       fs.readFileSync(themePath, "utf8").trim() !== expected.trim();
 
     if (needsWrite) {
-      fs.writeFileSync(themePath, expected, "utf8", { mode: 0o644 });
+      fs.writeFileSync(themePath, expected, { encoding: "utf8", mode: 0o644 });
     }
   } catch {
     // Silently ignore -- theme writing is best-effort
