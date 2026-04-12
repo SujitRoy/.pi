@@ -64,6 +64,8 @@ interface FooterState {
   contextPercent: number | null;
   contextTokens: number | null;
   contextWindow: number;
+  provider: string;
+  modelName: string;
   sessionName: string | null;
   isCompacting: boolean;
   hasData: boolean;
@@ -86,6 +88,8 @@ const state: FooterState = {
   contextPercent: null,
   contextTokens: null,
   contextWindow: 0,
+  provider: "",
+  modelName: "no-model",
   sessionName: null,
   isCompacting: false,
   hasData: false,
@@ -249,6 +253,9 @@ function refreshState(ctx: ExtensionContext) {
   state.contextTokens = usage?.tokens ?? null;
   state.contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
 
+  state.provider = (ctx.model as any)?.provider ?? "";
+  state.modelName = ctx.model?.id || "no-model";
+
   state.sessionName = SHOW_SESSION_NAME ? (ctx.sessionManager.getSessionName() ?? null) : null;
   state.hasData = true;
 }
@@ -303,6 +310,13 @@ function createFooterComponent(): Component {
         segs.push(`${pctCol(`ctx:${pct.toFixed(1)}%`)}${dim(tokStr)}${w2}`);
       } else {
         segs.push(muted(`ctx:?/${formatTokens(state.contextWindow)}`));
+      }
+
+      // 4. Model (provider) name
+      if (state.provider) {
+        segs.push(`${muted(state.provider)} ${accent(state.modelName)}`);
+      } else {
+        segs.push(accent(state.modelName));
       }
 
       // 5. Session tokens
