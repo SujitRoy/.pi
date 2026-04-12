@@ -139,6 +139,46 @@ const SEARXNG_CONFIG = {
   maxResults: 8,
 } as const;
 
+/** Maximum HTML size for content extraction (500KB) */
+const MAX_HTML_SIZE = 500 * 1024;
+
+/** Simple token bucket rate limiter */
+class RateLimiter {
+  private tokens: number;
+  private lastRefill: number;
+
+  constructor(
+    private maxTokens: number,
+    private refillRate: number,
+  ) {
+    this.tokens = maxTokens;
+    this.lastRefill = Date.now();
+  }
+
+  tryConsume(tokens = 1): boolean {
+    this.refill();
+    if (this.tokens >= tokens) {
+      this.tokens -= tokens;
+      return true;
+    }
+    return false;
+  }
+
+  private refill(): void {
+    const now = Date.now();
+    const elapsed = (now - this.lastRefill) / 1000;
+    this.tokens = Math.min(
+      this.maxTokens,
+      this.tokens + elapsed * this.refillRate,
+    );
+    this.lastRefill = now;
+  }
+}
+
+/** Rate limiters: 10 searches with 2/sec refill, 20 fetches with 5/sec refill */
+const searchLimiter = new RateLimiter(10, 2);
+const fetchLimiter = new RateLimiter(20, 5);
+
 // Simple in-memory cache for search results
 const searchCache = new Map<
   string,
@@ -464,6 +504,10 @@ function detectQueryType(query: string): string {
  * Uses a robust approach without external dependencies
  */
 function extractTextFromHTML(html: string): string {
+  if (html.length > MAX_HTML_SIZE) {
+    html = html.slice(0, MAX_HTML_SIZE);
+  }
+
   let text = html;
 
   // Remove script, style, noscript, svg content entirely (handle nested/malformed tags)
@@ -918,6 +962,25 @@ async function search(
     depth = "standard",
   } = options;
 
+  if (!searchLimiter.tryConsume()) {
+    return {
+      results: [],
+      suggestions: [],
+      answers: [],
+      numberOfResults: 0,
+      hasErrors: true,
+      error: "Rate limit exceeded. Please wait before searching again.",
+      queryType: detectQueryType(query),
+      confidence: {
+        score: 0,
+        level: "low",
+        reasons: ["Rate limited"],
+        totalResults: 0,
+        returnedCount: 0,
+      },
+    };
+  }
+
   // Create cache key with structured prefix to avoid collisions
   const cacheKey = `ws:search:${query}|${language}|${category}|${maxResults}|${depth}`;
   const isTimeSensitive = needsRecentResults(query);
@@ -1274,6 +1337,11 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      if (!fetchLimiter.tryConsume()) {
+        const errorText = `**Fetch Content Rate Limited**\n\nToo many requests. Please wait before fetching more content.`;
+        return { content: [{ type: "text", text: errorText }], details: {}, isError: true };
+      }
+
       const url = params?.url;
 
       if (!url || typeof url !== "string" || url.trim() === "") {

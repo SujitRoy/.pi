@@ -100,45 +100,56 @@ const AURORA_THEME = {
 };
 
 export default async function (): Promise<void> {
-  // Write the theme JSON to Pi's custom themes directory
-  // so it shows up in /theme list and persists across reloads.
   try {
     const fs = await import("fs");
     const path = await import("path");
     const os = await import("os");
 
-    const agentDir = process.env.PI_AGENT_DIR
-      ? (process.env.PI_AGENT_DIR.startsWith("~/")
-          ? os.homedir() + process.env.PI_AGENT_DIR.slice(1)
-          : process.env.PI_AGENT_DIR)
-      : path.join(os.homedir(), ".pi", "agent");
+    const defaultDir = path.join(os.homedir(), ".pi", "agent");
+    const homeDir = path.resolve(os.homedir());
+
+    let agentDir: string;
+    if (process.env.PI_AGENT_DIR) {
+      let rawDir = process.env.PI_AGENT_DIR;
+      if (rawDir.startsWith("~/")) {
+        rawDir = path.join(os.homedir(), rawDir.slice(2));
+      }
+      const resolved = path.resolve(rawDir);
+      if (!resolved.startsWith(homeDir)) {
+        console.warn(
+          `[theme-aurora] PI_AGENT_DIR "${rawDir}" is outside home directory, using default`,
+        );
+        agentDir = defaultDir;
+      } else {
+        agentDir = resolved;
+      }
+    } else {
+      agentDir = defaultDir;
+    }
 
     const themesDir = path.join(agentDir, "themes");
-
-    // Create themes dir if it doesn't exist
     if (!fs.existsSync(themesDir)) {
       fs.mkdirSync(themesDir, { recursive: true });
     }
 
     const themePath = path.join(themesDir, "aurora.json");
-
-    // Only write if file doesn't exist or is different
-    const expected = JSON.stringify(
-      {
-        $schema:
-          "https://raw.githubusercontent.com/badlogic/pi-mono/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
-        ...AURORA_THEME,
-      },
-      null,
-      "\t",
-    ) + "\n";
+    const expected =
+      JSON.stringify(
+        {
+          $schema:
+            "https://raw.githubusercontent.com/badlogic/pi-mono/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+          ...AURORA_THEME,
+        },
+        null,
+        "\t",
+      ) + "\n";
 
     const needsWrite =
       !fs.existsSync(themePath) ||
       fs.readFileSync(themePath, "utf8").trim() !== expected.trim();
 
     if (needsWrite) {
-      fs.writeFileSync(themePath, expected, "utf8");
+      fs.writeFileSync(themePath, expected, "utf8", { mode: 0o644 });
     }
   } catch {
     // Silently ignore -- theme writing is best-effort

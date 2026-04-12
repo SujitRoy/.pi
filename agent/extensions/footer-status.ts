@@ -21,6 +21,7 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import { execSync } from "child_process";
 import * as path from "path";
+import * as fs from "fs";
 
 /** Minimal Component interface (mirrors pi-tui Component) */
 interface Component {
@@ -105,16 +106,29 @@ let currentFooterData: ReadonlyFooterDataProvider | null = null;
 // Git Helpers
 // ============================================================================
 
+function validateCwd(cwd: string): string {
+  const resolved = path.resolve(cwd);
+  try {
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+      return process.cwd();
+    }
+  } catch {
+    return process.cwd();
+  }
+  return resolved;
+}
+
 function getGitBranch(cwd: string): string | null {
+  const dir = validateCwd(cwd);
   try {
     const branch = execSync("git branch --show-current", {
-      cwd,
+      cwd: dir,
       timeout: 2000,
       encoding: "utf8",
     }).trim();
     if (branch) return branch;
     const head = execSync("git rev-parse --short HEAD", {
-      cwd,
+      cwd: dir,
       timeout: 2000,
       encoding: "utf8",
     }).trim();
@@ -125,9 +139,10 @@ function getGitBranch(cwd: string): string | null {
 }
 
 function getWorkingTreeStats(cwd: string) {
+  const dir = validateCwd(cwd);
   try {
     const output = execSync("git status --porcelain", {
-      cwd,
+      cwd: dir,
       timeout: 2000,
       encoding: "utf8",
     });
