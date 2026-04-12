@@ -37,13 +37,225 @@
  * - cwd parameter specifies working directory (defaults to current)
  */
 
-const { execFile } = require('child_process');
-const util = require('util');
-const path = require('path');
-const os = require('os');
-const fs = require('fs');
+import { execFile, ExecFileException } from 'child_process';
+import { promisify } from 'util';
+import * as path from 'path';
+import * as os from 'os';
+import * as fs from 'fs';
+import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
+import { Type } from '@sinclair/typebox';
 
-const execFileAsync = util.promisify(execFile);
+const execFileAsync = promisify(execFile);
+
+// ============================================================================
+// Type Definitions
+// ============================================================================
+
+interface GitCommandOptions {
+  timeout?: number;
+  maxBuffer?: number;
+  signal?: AbortSignal | null;
+}
+
+interface GitCommandResult {
+  success: boolean;
+  error?: string;
+  stdout: string;
+  stderr: string;
+  exitCode?: number;
+  signal?: string;
+  killed?: boolean;
+}
+
+interface StatusFile {
+  file: string;
+  status: string;
+}
+
+interface StatusResult {
+  success: boolean;
+  error?: string;
+  branch: string;
+  upstream: string | null;
+  staged: StatusFile[];
+  unstaged: StatusFile[];
+  untracked: string[];
+  unmerged: Array<{ file: string; indexStatus: string; worktreeStatus: string }>;
+  clean: boolean;
+}
+
+interface DiffOptions {
+  staged?: boolean;
+  file?: string | null;
+  stat?: boolean;
+  nameOnly?: boolean;
+}
+
+interface DiffResult {
+  success: boolean;
+  error?: string;
+  diff: string;
+  hasChanges: boolean;
+}
+
+interface AddResult {
+  success: boolean;
+  error?: string | null;
+  staged: string[];
+}
+
+interface CommitResult {
+  success: boolean;
+  error?: string | null;
+  hash?: string | null;
+  branch?: string | null;
+  message?: string;
+  summary?: string;
+  isDetailed?: boolean;
+  stdout?: string;
+}
+
+interface Branch {
+  name: string;
+  current: boolean;
+  remote: boolean;
+}
+
+interface BranchResult {
+  success: boolean;
+  error?: string;
+  hint?: string;
+  branches?: Branch[];
+  branch?: string;
+  message?: string | null;
+  summary?: string;
+}
+
+interface CommitInfo {
+  hash: string;
+  refs: string | null;
+  message: string;
+}
+
+interface LogResult {
+  success: boolean;
+  error?: string;
+  commits: CommitInfo[];
+  count: number;
+}
+
+interface StashResult {
+  success: boolean;
+  error?: string;
+  summary?: string;
+  stashes?: string[];
+  count?: number;
+  diff?: string;
+}
+
+interface PushResult {
+  success: boolean;
+  error?: string | null;
+  remote: string;
+  branch?: string | null;
+  summary: string;
+}
+
+interface PullResult {
+  success: boolean;
+  error?: string | null;
+  remote: string;
+  branch?: string | null;
+  summary: string;
+}
+
+interface RemoteInfo {
+  [key: string]: {
+    fetch?: string;
+    push?: string;
+  };
+}
+
+interface RemoteResult {
+  success: boolean;
+  error?: string;
+  remotes?: RemoteInfo;
+  remote?: string;
+  url?: string;
+}
+
+interface ResetResult {
+  success: boolean;
+  error?: string;
+  mode: string;
+  target: string;
+  summary?: string;
+}
+
+interface TagResult {
+  success: boolean;
+  error?: string;
+  tags?: string[];
+  count?: number;
+  tag?: string;
+  target?: string;
+  remote?: string;
+}
+
+interface RebaseResult {
+  success: boolean;
+  error?: string;
+  target?: string;
+  summary?: string;
+}
+
+interface CherryPickResult {
+  success: boolean;
+  error?: string;
+  commit: string;
+  summary?: string;
+}
+
+interface BlameResult {
+  success: boolean;
+  error?: string;
+  file: string;
+  blame: string;
+}
+
+interface ShowResult {
+  success: boolean;
+  error?: string;
+  commit: string;
+  output: string;
+}
+
+interface TagOptions {
+  message?: string;
+  remote?: string;
+}
+
+interface CherryPickOptions {
+  noCommit?: boolean;
+  signoff?: boolean;
+}
+
+interface BlameOptions {
+  lineNumbers?: boolean;
+  email?: boolean;
+}
+
+interface ShowOptions {
+  file?: string;
+  stat?: boolean;
+  nameOnly?: boolean;
+}
+
+// Extend execFileAsync result type
+interface ExecFileResult {
+  stdout: string;
+  stderr: string;
+}
 
 // ============================================================================
 // Security Utilities
@@ -52,7 +264,7 @@ const execFileAsync = util.promisify(execFile);
 /**
  * Validate and sanitize file path to prevent command injection
  */
-function validateFilePath(filePath, baseDir) {
+function validateFilePath(filePath: string, baseDir: string): string {
   if (!filePath || typeof filePath !== 'string') {
     throw new Error(`Invalid file path: ${filePath}`);
   }
@@ -89,7 +301,7 @@ function validateFilePath(filePath, baseDir) {
 /**
  * Validate working directory
  */
-function validateCwd(cwd) {
+function validateCwd(cwd?: string): string {
   const workingDir = cwd || process.cwd();
 
   // Check if path exists
@@ -109,9 +321,9 @@ function validateCwd(cwd) {
 /**
  * Validate that directory is a git repository
  */
-async function validateGitRepo(workingDir) {
+async function validateGitRepo(workingDir: string): Promise<boolean> {
   try {
-    const result = await execFileAsync('git', ['rev-parse', '--git-dir'], {
+    await execFileAsync('git', ['rev-parse', '--git-dir'], {
       cwd: workingDir,
       timeout: 5000
     });
@@ -124,7 +336,7 @@ async function validateGitRepo(workingDir) {
 /**
  * Validate numeric parameter
  */
-function validateNumber(value, name, min = 1, max = 1000) {
+function validateNumber(value: number, name: string, min: number = 1, max: number = 1000): number {
   const num = Number(value);
   if (!Number.isInteger(num) || num < min || num > max) {
     throw new Error(`Invalid ${name}: must be integer between ${min} and ${max}`);
@@ -137,9 +349,18 @@ function validateNumber(value, name, min = 1, max = 1000) {
 // ============================================================================
 
 /**
+ * Cache of verified git repository directories
+ */
+const gitReposChecked = new Set<string>();
+
+/**
  * Execute a git command with error handling and cancellation support
  */
-async function executeGitCommand(cwd, args, options = {}) {
+async function executeGitCommand(
+  cwd: string,
+  args: string[],
+  options: GitCommandOptions = {}
+): Promise<GitCommandResult> {
   const {
     timeout = 30000,
     maxBuffer = 10 * 1024 * 1024, // 10MB
@@ -149,15 +370,15 @@ async function executeGitCommand(cwd, args, options = {}) {
   const workingDir = validateCwd(cwd);
 
   // Validate it's a git repository (check once, cache result)
-  if (!executeGitCommand._gitReposChecked?.has(workingDir)) {
+  if (!gitReposChecked.has(workingDir)) {
     try {
       await validateGitRepo(workingDir);
-      if (!executeGitCommand._gitReposChecked) executeGitCommand._gitReposChecked = new Set();
-      executeGitCommand._gitReposChecked.add(workingDir);
+      gitReposChecked.add(workingDir);
     } catch (error) {
+      const err = error as Error;
       return {
         success: false,
-        error: error.message,
+        error: err.message,
         stdout: '',
         stderr: ''
       };
@@ -175,7 +396,7 @@ async function executeGitCommand(cwd, args, options = {}) {
   }
 
   try {
-    const result = await new Promise((resolve, reject) => {
+    const result = await new Promise<ExecFileResult>((resolve, reject) => {
       let stdout = '';
       let stderr = '';
 
@@ -183,10 +404,11 @@ async function executeGitCommand(cwd, args, options = {}) {
         cwd: workingDir,
         timeout,
         maxBuffer,
+        encoding: 'utf8',
         env: { ...process.env }
-      }, (error, stdout, stderr) => {
+      }, (error: ExecFileException | null, stdout: string, stderr: string) => {
         if (error) {
-          const err = new Error(error.message);
+          const err = new Error(error.message) as ExecFileException & { exitCode?: string | number | null; stdout?: string; stderr?: string };
           err.exitCode = error.code;
           err.stdout = stdout || '';
           err.stderr = stderr || '';
@@ -210,18 +432,19 @@ async function executeGitCommand(cwd, args, options = {}) {
       stderr: result.stderr.trim()
     };
   } catch (error) {
+    const err = error as ExecFileException & { exitCode?: string | number | null; stdout?: string; stderr?: string };
     // Preserve useful error information without leaking internal stack traces
     return {
       success: false,
-      error: error.message,
-      stdout: error.stdout?.trim() || '',
-      stderr: error.stderr?.trim() || '',
-      exitCode: error.exitCode || error.code,
-      signal: error.signal,
-      killed: error.killed
+      error: err.message,
+      stdout: err.stdout?.trim() || '',
+      stderr: err.stderr?.trim() || '',
+      exitCode: (err.exitCode || err.code) ? Number(err.exitCode || err.code) : undefined,
+      signal: (err as any).signal,
+      killed: (err as any).killed
     };
   }
-}
+};
 
 // ============================================================================
 // Git Operations
@@ -230,12 +453,12 @@ async function executeGitCommand(cwd, args, options = {}) {
 /**
  * Get git status
  */
-async function gitStatus(cwd) {
+async function gitStatus(cwd?: string): Promise<StatusResult> {
   const workingDir = validateCwd(cwd);
   const result = await executeGitCommand(workingDir, ['status', '--short', '--branch']);
 
   if (!result.success) {
-    return { success: false, error: result.error };
+    return { success: false, error: result.error, branch: '', upstream: null, staged: [], unstaged: [], untracked: [], unmerged: [], clean: false };
   }
 
   // Parse status output with comprehensive status code handling
@@ -244,7 +467,7 @@ async function gitStatus(cwd) {
   const branchMatch = branchLine.match(/## (.+?)(?:\.\.\.(.+))?$/);
 
   // Status code mapping
-  const statusMap = {
+  const statusMap: Record<string, string> = {
     'M': 'modified',
     'A': 'added',
     'D': 'deleted',
@@ -257,7 +480,7 @@ async function gitStatus(cwd) {
     '?': 'untracked'
   };
 
-  const status = {
+  const status: StatusResult = {
     success: true,
     branch: branchMatch ? branchMatch[1] : 'unknown',
     upstream: branchMatch ? branchMatch[2] : null,
@@ -284,7 +507,11 @@ async function gitStatus(cwd) {
 
     // Handle unmerged files
     if (indexStatus === 'U' || worktreeStatus === 'U') {
-      status.unmerged.push({ file: filePath, indexStatus: statusMap[indexStatus] || indexStatus, worktreeStatus: statusMap[worktreeStatus] || worktreeStatus });
+      status.unmerged.push({ 
+        file: filePath, 
+        indexStatus: statusMap[indexStatus] || indexStatus, 
+        worktreeStatus: statusMap[worktreeStatus] || worktreeStatus 
+      });
       continue;
     }
 
@@ -311,7 +538,7 @@ async function gitStatus(cwd) {
 /**
  * Get git diff
  */
-async function gitDiff(cwd, options = {}) {
+async function gitDiff(cwd?: string, options: DiffOptions = {}): Promise<DiffResult> {
   const workingDir = validateCwd(cwd);
   const {
     staged = false,
@@ -320,7 +547,7 @@ async function gitDiff(cwd, options = {}) {
     nameOnly = false
   } = options;
 
-  const args = ['diff', '--no-color'];
+  const args: string[] = ['diff', '--no-color'];
 
   if (stat) {
     args.push('--stat');
@@ -340,7 +567,7 @@ async function gitDiff(cwd, options = {}) {
   const result = await executeGitCommand(workingDir, args);
 
   if (!result.success) {
-    return { success: false, error: result.error };
+    return { success: false, error: result.error, diff: '', hasChanges: false };
   }
 
   return {
@@ -353,20 +580,21 @@ async function gitDiff(cwd, options = {}) {
 /**
  * Stage files
  */
-async function gitAdd(files, cwd) {
+async function gitAdd(files: string[], cwd?: string): Promise<AddResult> {
   if (!files || files.length === 0) {
-    return { success: false, error: 'No files specified' };
+    return { success: false, error: 'No files specified', staged: [] };
   }
 
   const workingDir = validateCwd(cwd);
 
   // Validate all file paths
-  const validatedFiles = [];
+  const validatedFiles: string[] = [];
   for (const file of files) {
     try {
       validatedFiles.push(validateFilePath(file, workingDir));
     } catch (error) {
-      return { success: false, error: `Invalid file "${file}": ${error.message}` };
+      const err = error as Error;
+      return { success: false, error: `Invalid file "${file}": ${err.message}`, staged: [] };
     }
   }
 
@@ -375,7 +603,7 @@ async function gitAdd(files, cwd) {
 
   return {
     success: result.success,
-    error: result.success ? null : result.error,
+    error: result.success ? undefined : result.error,
     staged: result.success ? validatedFiles : []
   };
 }
@@ -383,7 +611,7 @@ async function gitAdd(files, cwd) {
 /**
  * Create a commit
  */
-async function gitCommit(message, cwd) {
+async function gitCommit(message: string, cwd?: string): Promise<CommitResult> {
   if (!message || typeof message !== 'string' || message.trim() === '') {
     return { success: false, error: 'Commit message is required' };
   }
@@ -410,19 +638,26 @@ async function gitCommit(message, cwd) {
   }
 
   // Use secure temp file creation
-  let tmpFile;
+  let tmpFile: string | undefined;
   try {
     const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'git-commit-'));
     tmpFile = path.join(tmpDir, 'message.txt');
     await fs.promises.writeFile(tmpFile, message, 'utf8');
   } catch (error) {
+    const err = error as Error;
     return {
       success: false,
-      error: `Failed to create temp file: ${error.message}`
+      error: `Failed to create temp file: ${err.message}`
     };
   }
 
   try {
+    if (!tmpFile) {
+      return {
+        success: false,
+        error: 'Failed to create temp file: path is undefined'
+      };
+    }
     const args = ['commit', '-F', tmpFile];
     const result = await executeGitCommand(workingDir, args);
 
@@ -454,14 +689,16 @@ async function gitCommit(message, cwd) {
       try {
         await fs.promises.unlink(tmpFile);
       } catch (error) {
-        console.error(`[git-tools] Failed to remove temp file ${tmpFile}: ${error.message}`);
+        const err = error as Error;
+        console.error(`[git-tools] Failed to remove temp file ${tmpFile}: ${err.message}`);
       }
       // Clean up temp directory (use recursive removal for safety)
       const tmpDir = path.dirname(tmpFile);
       try {
         await fs.promises.rm(tmpDir, { recursive: true, force: true });
       } catch (error) {
-        console.error(`[git-tools] Failed to remove temp directory ${tmpDir}: ${error.message}`);
+        const err = error as Error;
+        console.error(`[git-tools] Failed to remove temp directory ${tmpDir}: ${err.message}`);
       }
     }
   }
@@ -470,7 +707,7 @@ async function gitCommit(message, cwd) {
 /**
  * Branch operations
  */
-async function gitBranch(action, name, cwd) {
+async function gitBranch(action: string, name?: string, cwd?: string): Promise<BranchResult> {
   const workingDir = validateCwd(cwd);
 
   // Validate branch name if provided
@@ -494,7 +731,7 @@ async function gitBranch(action, name, cwd) {
         return { success: false, error: result.error };
       }
 
-      const branches = result.stdout.split('\n')
+      const branches: Branch[] = result.stdout.split('\n')
         .map(line => line.trim())
         .filter(line => line)
         .map(line => ({
@@ -521,7 +758,7 @@ async function gitBranch(action, name, cwd) {
       const result = await executeGitCommand(workingDir, ['branch', name]);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error,
+        error: result.success ? undefined : result.stderr || result.error,
         branch: name,
         message: result.success ? `Branch '${name}' created` : null
       };
@@ -534,7 +771,7 @@ async function gitBranch(action, name, cwd) {
       const result = await executeGitCommand(workingDir, ['checkout', name]);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error,
+        error: result.success ? undefined : result.stderr || result.error,
         branch: name
       };
     }
@@ -578,7 +815,7 @@ async function gitBranch(action, name, cwd) {
       const result = await executeGitCommand(workingDir, ['branch', '-D', name]);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error,
+        error: result.success ? undefined : result.stderr || result.error,
         branch: name
       };
     }
@@ -590,7 +827,7 @@ async function gitBranch(action, name, cwd) {
       const result = await executeGitCommand(workingDir, ['merge', name]);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error,
+        error: result.success ? undefined : result.stderr || result.error,
         branch: name,
         summary: result.stdout
       };
@@ -604,7 +841,7 @@ async function gitBranch(action, name, cwd) {
 /**
  * View commit log
  */
-async function gitLog(count, cwd) {
+async function gitLog(count: number = 10, cwd?: string): Promise<LogResult> {
   const workingDir = validateCwd(cwd);
   const validatedCount = validateNumber(count, 'count', 1, 1000);
 
@@ -612,10 +849,10 @@ async function gitLog(count, cwd) {
   const result = await executeGitCommand(workingDir, args);
 
   if (!result.success) {
-    return { success: false, error: result.error };
+    return { success: false, error: result.error, commits: [], count: 0 };
   }
 
-  const commits = result.stdout.split('\n')
+  const commits: CommitInfo[] = result.stdout.split('\n')
     .filter(line => line.trim())
     .map(line => {
       // Improved regex for parsing git log with --decorate
@@ -645,7 +882,7 @@ async function gitLog(count, cwd) {
 /**
  * Stash operations
  */
-async function gitStash(action, cwd, index = null) {
+async function gitStash(action: string, cwd?: string, index: number | null = null): Promise<StashResult> {
   const workingDir = validateCwd(cwd);
 
   // Validate stash index if provided
@@ -660,7 +897,7 @@ async function gitStash(action, cwd, index = null) {
       const result = await executeGitCommand(workingDir, ['stash', 'push']);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error,
+        error: result.success ? undefined : result.stderr || result.error,
         summary: result.stdout
       };
     }
@@ -682,7 +919,7 @@ async function gitStash(action, cwd, index = null) {
       const result = await executeGitCommand(workingDir, args);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error,
+        error: result.success ? undefined : result.stderr || result.error,
         summary: result.stdout
       };
     }
@@ -695,7 +932,7 @@ async function gitStash(action, cwd, index = null) {
       const result = await executeGitCommand(workingDir, args);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error,
+        error: result.success ? undefined : result.stderr || result.error,
         summary: result.stdout
       };
     }
@@ -708,7 +945,7 @@ async function gitStash(action, cwd, index = null) {
       const result = await executeGitCommand(workingDir, args);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error,
+        error: result.success ? undefined : result.stderr || result.error,
         summary: result.stdout
       };
     }
@@ -717,7 +954,7 @@ async function gitStash(action, cwd, index = null) {
       const result = await executeGitCommand(workingDir, ['stash', 'clear']);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error
+        error: result.success ? undefined : result.stderr || result.error
       };
     }
 
@@ -729,7 +966,7 @@ async function gitStash(action, cwd, index = null) {
       const result = await executeGitCommand(workingDir, args);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error,
+        error: result.success ? undefined : result.stderr || result.error,
         diff: result.stdout
       };
     }
@@ -742,16 +979,16 @@ async function gitStash(action, cwd, index = null) {
 /**
  * Push to remote
  */
-async function gitPush(remote = 'origin', branch = null, cwd, force = false) {
+async function gitPush(remote: string = 'origin', branch: string | null = null, cwd?: string, force: boolean = false): Promise<PushResult> {
   const workingDir = validateCwd(cwd);
 
   // Pre-flight: check if there are commits to push
   const statusResult = await executeGitCommand(workingDir, ['status', '--short', '--branch']);
   if (!statusResult.success) {
-    return { success: false, error: 'Failed to check repository status' };
+    return { success: false, error: 'Failed to check repository status', remote, summary: '' };
   }
 
-  const args = ['push'];
+  const args: string[] = ['push'];
   if (force) {
     args.push('--force-with-lease');
   }
@@ -769,7 +1006,7 @@ async function gitPush(remote = 'origin', branch = null, cwd, force = false) {
 
   return {
     success: result.success,
-    error: result.success ? null : result.stderr || result.error,
+    error: result.success ? undefined : result.stderr || result.error,
     remote,
     branch,
     summary: summary + forceWarning
@@ -779,13 +1016,13 @@ async function gitPush(remote = 'origin', branch = null, cwd, force = false) {
 /**
  * Pull from remote
  */
-async function gitPull(remote = 'origin', branch = null, cwd) {
+async function gitPull(remote: string = 'origin', branch: string | null = null, cwd?: string): Promise<PullResult> {
   const workingDir = validateCwd(cwd);
 
   // Pre-flight: check for uncommitted changes
-  const statusResult = await executeGitCommand(workingDir, ['status', '--porcelain']);
+  await executeGitCommand(workingDir, ['status', '--porcelain']);
 
-  const args = ['pull'];
+  const args: string[] = ['pull'];
   if (remote) {
     args.push(remote);
   }
@@ -797,7 +1034,7 @@ async function gitPull(remote = 'origin', branch = null, cwd) {
 
   return {
     success: result.success,
-    error: result.success ? null : result.stderr || result.error,
+    error: result.success ? undefined : result.stderr || result.error,
     remote,
     branch,
     summary: result.stdout || result.stderr
@@ -807,7 +1044,7 @@ async function gitPull(remote = 'origin', branch = null, cwd) {
 /**
  * Remote management
  */
-async function gitRemote(action, name, url, cwd) {
+async function gitRemote(action: string, name?: string, url?: string, cwd?: string): Promise<RemoteResult> {
   const workingDir = validateCwd(cwd);
 
   // Validate remote name if provided
@@ -834,7 +1071,7 @@ async function gitRemote(action, name, url, cwd) {
         return { success: false, error: result.error };
       }
 
-      const remotes = {};
+      const remotes: RemoteInfo = {};
       const lines = result.stdout.split('\n').filter(line => line.trim());
       for (const line of lines) {
         const parts = line.split(/\s+/);
@@ -846,7 +1083,7 @@ async function gitRemote(action, name, url, cwd) {
           if (!remotes[remoteName]) {
             remotes[remoteName] = {};
           }
-          remotes[remoteName][type] = remoteUrl;
+          remotes[remoteName][type as 'fetch' | 'push'] = remoteUrl;
         }
       }
 
@@ -860,7 +1097,7 @@ async function gitRemote(action, name, url, cwd) {
       const result = await executeGitCommand(workingDir, ['remote', 'add', name, url]);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error,
+        error: result.success ? undefined : result.stderr || result.error,
         remote: name,
         url
       };
@@ -873,7 +1110,7 @@ async function gitRemote(action, name, url, cwd) {
       const result = await executeGitCommand(workingDir, ['remote', 'remove', name]);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error,
+        error: result.success ? undefined : result.stderr || result.error,
         remote: name
       };
     }
@@ -885,7 +1122,7 @@ async function gitRemote(action, name, url, cwd) {
       const result = await executeGitCommand(workingDir, ['remote', 'set-url', name, url]);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error,
+        error: result.success ? undefined : result.stderr || result.error,
         remote: name,
         url
       };
@@ -899,7 +1136,7 @@ async function gitRemote(action, name, url, cwd) {
 /**
  * Reset operations
  */
-async function gitReset(mode, target, cwd) {
+async function gitReset(mode: string, target: string = 'HEAD', cwd?: string): Promise<ResetResult> {
   const workingDir = validateCwd(cwd);
 
   // Validate mode
@@ -907,7 +1144,9 @@ async function gitReset(mode, target, cwd) {
   if (!validModes.includes(mode)) {
     return {
       success: false,
-      error: `Invalid reset mode: ${mode}. Must be one of: ${validModes.join(', ')}`
+      error: `Invalid reset mode: ${mode}. Must be one of: ${validModes.join(', ')}`,
+      mode,
+      target: target || 'HEAD'
     };
   }
 
@@ -916,19 +1155,23 @@ async function gitReset(mode, target, cwd) {
     if (typeof target !== 'string' || target.startsWith('-')) {
       return {
         success: false,
-        error: 'Invalid target: must be a valid commit reference, not starting with -'
+        error: 'Invalid target: must be a valid commit reference, not starting with -',
+        mode,
+        target: target || 'HEAD'
       };
     }
     // Validate as commit-ish (alphanumeric, dots, slashes, hyphens)
     if (!/^[a-zA-Z0-9._/\-]+$/.test(target)) {
       return {
         success: false,
-        error: 'Invalid target: contains forbidden characters'
+        error: 'Invalid target: contains forbidden characters',
+        mode,
+        target: target || 'HEAD'
       };
     }
   }
 
-  const args = ['reset'];
+  const args: string[] = ['reset'];
 
   if (mode === 'soft') {
     args.push('--soft');
@@ -945,7 +1188,7 @@ async function gitReset(mode, target, cwd) {
 
   return {
     success: result.success,
-    error: result.success ? null : result.stderr || result.error,
+    error: result.success ? undefined : result.stderr || result.error,
     mode,
     target: target || 'HEAD',
     summary: result.stdout
@@ -955,7 +1198,7 @@ async function gitReset(mode, target, cwd) {
 /**
  * Tag management
  */
-async function gitTag(action, name, target, cwd, options = {}) {
+async function gitTag(action: string, name?: string, target?: string, cwd?: string, options: TagOptions = {}): Promise<TagResult> {
   const workingDir = validateCwd(cwd);
 
   // Validate tag name if provided
@@ -984,7 +1227,7 @@ async function gitTag(action, name, target, cwd, options = {}) {
         return { success: false, error: 'Tag name is required' };
       }
 
-      const args = ['tag'];
+      const args: string[] = ['tag'];
 
       if (options.message) {
         args.push('-a', name, '-m', options.message);
@@ -999,7 +1242,7 @@ async function gitTag(action, name, target, cwd, options = {}) {
       const result = await executeGitCommand(workingDir, args);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error,
+        error: result.success ? undefined : result.stderr || result.error,
         tag: name,
         target: target || 'HEAD'
       };
@@ -1012,7 +1255,7 @@ async function gitTag(action, name, target, cwd, options = {}) {
       const result = await executeGitCommand(workingDir, ['tag', '-d', name]);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error,
+        error: result.success ? undefined : result.stderr || result.error,
         tag: name
       };
     }
@@ -1025,7 +1268,7 @@ async function gitTag(action, name, target, cwd, options = {}) {
       const result = await executeGitCommand(workingDir, ['push', remote, name]);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error,
+        error: result.success ? undefined : result.stderr || result.error,
         tag: name,
         remote
       };
@@ -1036,7 +1279,7 @@ async function gitTag(action, name, target, cwd, options = {}) {
       const result = await executeGitCommand(workingDir, ['push', remote, '--tags']);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error,
+        error: result.success ? undefined : result.stderr || result.error,
         remote
       };
     }
@@ -1049,7 +1292,7 @@ async function gitTag(action, name, target, cwd, options = {}) {
 /**
  * Rebase operations
  */
-async function gitRebase(action, target, cwd) {
+async function gitRebase(action: string, target?: string, cwd?: string): Promise<RebaseResult> {
   const workingDir = validateCwd(cwd);
 
   switch (action) {
@@ -1060,7 +1303,7 @@ async function gitRebase(action, target, cwd) {
       const result = await executeGitCommand(workingDir, ['rebase', target]);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error,
+        error: result.success ? undefined : result.stderr || result.error,
         target,
         summary: result.stdout
       };
@@ -1070,7 +1313,7 @@ async function gitRebase(action, target, cwd) {
       const result = await executeGitCommand(workingDir, ['rebase', '--continue']);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error,
+        error: result.success ? undefined : result.stderr || result.error,
         summary: result.stdout
       };
     }
@@ -1079,7 +1322,7 @@ async function gitRebase(action, target, cwd) {
       const result = await executeGitCommand(workingDir, ['rebase', '--abort']);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error
+        error: result.success ? undefined : result.stderr || result.error
       };
     }
 
@@ -1087,7 +1330,7 @@ async function gitRebase(action, target, cwd) {
       const result = await executeGitCommand(workingDir, ['rebase', '--skip']);
       return {
         success: result.success,
-        error: result.success ? null : result.stderr || result.error
+        error: result.success ? undefined : result.stderr || result.error
       };
     }
 
@@ -1099,19 +1342,19 @@ async function gitRebase(action, target, cwd) {
 /**
  * Cherry pick commits
  */
-async function gitCherryPick(commit, cwd, options = {}) {
+async function gitCherryPick(commit: string, cwd?: string, options: CherryPickOptions = {}): Promise<CherryPickResult> {
   const workingDir = validateCwd(cwd);
 
   if (!commit || typeof commit !== 'string') {
-    return { success: false, error: 'Commit hash is required' };
+    return { success: false, error: 'Commit hash is required', commit: '' };
   }
 
   // Validate commit to prevent option injection
   if (commit.startsWith('-')) {
-    return { success: false, error: 'Invalid commit: must not start with -' };
+    return { success: false, error: 'Invalid commit: must not start with -', commit: '' };
   }
 
-  const args = ['cherry-pick'];
+  const args: string[] = ['cherry-pick'];
 
   if (options.noCommit) {
     args.push('--no-commit');
@@ -1127,7 +1370,7 @@ async function gitCherryPick(commit, cwd, options = {}) {
 
   return {
     success: result.success,
-    error: result.success ? null : result.stderr || result.error,
+    error: result.success ? undefined : result.stderr || result.error,
     commit,
     summary: result.stdout
   };
@@ -1136,11 +1379,11 @@ async function gitCherryPick(commit, cwd, options = {}) {
 /**
  * View line-by-line annotations
  */
-async function gitBlame(file, cwd, options = {}) {
+async function gitBlame(file: string, cwd?: string, options: BlameOptions = {}): Promise<BlameResult> {
   const workingDir = validateCwd(cwd);
   const validatedFile = validateFilePath(file, workingDir);
 
-  const args = ['blame'];
+  const args: string[] = ['blame'];
 
   if (options.lineNumbers) {
     args.push('-n');
@@ -1156,7 +1399,7 @@ async function gitBlame(file, cwd, options = {}) {
 
   return {
     success: result.success,
-    error: result.success ? null : result.stderr || result.error,
+    error: result.success ? undefined : result.stderr || result.error,
     file,
     blame: result.stdout
   };
@@ -1165,19 +1408,19 @@ async function gitBlame(file, cwd, options = {}) {
 /**
  * View commit details
  */
-async function gitShow(commit, cwd, options = {}) {
+async function gitShow(commit: string, cwd?: string, options: ShowOptions = {}): Promise<ShowResult> {
   const workingDir = validateCwd(cwd);
 
   if (!commit || typeof commit !== 'string') {
-    return { success: false, error: 'Commit hash is required' };
+    return { success: false, error: 'Commit hash is required', commit: '', output: '' };
   }
 
   // Validate commit to prevent option injection
   if (commit.startsWith('-')) {
-    return { success: false, error: 'Invalid commit: must not start with -' };
+    return { success: false, error: 'Invalid commit: must not start with -', commit: '', output: '' };
   }
 
-  const args = ['show'];
+  const args: string[] = ['show'];
 
   if (options.stat) {
     args.push('--stat');
@@ -1200,7 +1443,7 @@ async function gitShow(commit, cwd, options = {}) {
 
   return {
     success: result.success,
-    error: result.success ? null : result.stderr || result.error,
+    error: result.success ? undefined : result.stderr || result.error,
     commit,
     output: result.stdout
   };
@@ -1210,7 +1453,7 @@ async function gitShow(commit, cwd, options = {}) {
 // Formatting Helpers
 // ============================================================================
 
-function formatStatus(status) {
+function formatStatus(status: StatusResult): string {
   if (!status.success) {
     return `**Git Status Error**\n\n${status.error}`;
   }
@@ -1219,7 +1462,7 @@ function formatStatus(status) {
     return `**Clean Working Tree**\n\nBranch: \`${status.branch}\``;
   }
 
-  const lines = [`**Git Status**\n`, `Branch: \`${status.branch}\``];
+  const lines: string[] = [`**Git Status**\n`, `Branch: \`${status.branch}\``];
 
   if (status.upstream) {
     lines.push(`Upstream: \`${status.upstream}\``);
@@ -1258,7 +1501,7 @@ function formatStatus(status) {
   return lines.join('\n');
 }
 
-function formatDiff(diffResult) {
+function formatDiff(diffResult: DiffResult): string {
   if (!diffResult.success) {
     return `**Git Diff Error**\n\n${diffResult.error}`;
   }
@@ -1271,7 +1514,7 @@ function formatDiff(diffResult) {
   return lines.join('\n');
 }
 
-function formatLog(logResult) {
+function formatLog(logResult: LogResult): string {
   if (!logResult.success) {
     return `**Git Log Error**\n\n${logResult.error}`;
   }
@@ -1289,8 +1532,8 @@ function formatLog(logResult) {
   return lines.join('\n');
 }
 
-function formatBranches(branchResult) {
-  if (!branchResult.success) {
+function formatBranches(branchResult: BranchResult): string {
+  if (!branchResult.success || !branchResult.branches) {
     return `**Git Branch Error**\n\n${branchResult.error}`;
   }
 
@@ -1307,8 +1550,8 @@ function formatBranches(branchResult) {
   return lines.join('\n');
 }
 
-function formatRemotes(remoteResult) {
-  if (!remoteResult.success) {
+function formatRemotes(remoteResult: RemoteResult): string {
+  if (!remoteResult.success || !remoteResult.remotes) {
     return `**Git Remote Error**\n\n${remoteResult.error}`;
   }
 
@@ -1332,28 +1575,37 @@ function formatRemotes(remoteResult) {
 // PI Agent Extension Factory
 // ============================================================================
 
-module.exports = function(api) {
+interface ToolExecuteResult {
+  content: Array<{ type: "text"; text: string }>;
+  details: Record<string, unknown>;
+  isError?: boolean;
+}
+
+export default async function (pi: ExtensionAPI): Promise<void> {
   // Register git_status tool
-  api.registerTool({
+  pi.registerTool({
     name: 'git_status',
+    label: 'Git Status',
     description: 'Check git repository status. Shows staged, unstaged, untracked, and unmerged files.',
-    parameters: {
-      type: 'object',
-      properties: {
-        cwd: {
-          type: 'string',
-          description: 'Working directory (defaults to current directory)'
-        }
-      }
-    },
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    parameters: Type.Object({
+      cwd: Type.Optional(Type.String({ description: 'Working directory (defaults to current directory)' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: { cwd?: string },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
       try {
         const status = await gitStatus(params?.cwd);
         const text = formatStatus(status);
-        return { content: [{ type: 'text', text }] };
+        return { content: [{ type: 'text', text }], details: {} };
       } catch (error) {
+        const err = error as Error;
         return {
-          content: [{ type: 'text', text: `**Git Status Failed**\n\n${error.message}` }],
+          content: [{ type: 'text', text: `**Git Status Failed**\n\n${err.message}` }],
+          details: {},
           isError: true
         };
       }
@@ -1361,38 +1613,24 @@ module.exports = function(api) {
   });
 
   // Register git_diff tool
-  api.registerTool({
+  pi.registerTool({
     name: 'git_diff',
+    label: 'Git Diff',
     description: 'View git differences. Can show staged or unstaged changes, or diff for a specific file.',
-    parameters: {
-      type: 'object',
-      properties: {
-        staged: {
-          type: 'boolean',
-          description: 'Show staged changes (default: false for unstaged)',
-          default: false
-        },
-        file: {
-          type: 'string',
-          description: 'Show diff for a specific file (optional)'
-        },
-        stat: {
-          type: 'boolean',
-          description: 'Show diffstat instead of full diff',
-          default: false
-        },
-        nameOnly: {
-          type: 'boolean',
-          description: 'Show only filenames changed',
-          default: false
-        },
-        cwd: {
-          type: 'string',
-          description: 'Working directory'
-        }
-      }
-    },
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    parameters: Type.Object({
+      staged: Type.Optional(Type.Boolean({ description: 'Show staged changes (default: false for unstaged)' })),
+      file: Type.Optional(Type.String({ description: 'Show diff for a specific file (optional)' })),
+      stat: Type.Optional(Type.Boolean({ description: 'Show diffstat instead of full diff' })),
+      nameOnly: Type.Optional(Type.Boolean({ description: 'Show only filenames changed' })),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: { cwd?: string; staged?: boolean; file?: string; stat?: boolean; nameOnly?: boolean },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
       try {
         const diffResult = await gitDiff(params?.cwd, {
           staged: params?.staged || false,
@@ -1401,10 +1639,12 @@ module.exports = function(api) {
           nameOnly: params?.nameOnly || false
         });
         const text = formatDiff(diffResult);
-        return { content: [{ type: 'text', text }] };
+        return { content: [{ type: 'text', text }], details: {} };
       } catch (error) {
+        const err = error as Error;
         return {
-          content: [{ type: 'text', text: `**Git Diff Failed**\n\n${error.message}` }],
+          content: [{ type: 'text', text: `**Git Diff Failed**\n\n${err.message}` }],
+          details: {},
           isError: true
         };
       }
@@ -1412,30 +1652,27 @@ module.exports = function(api) {
   });
 
   // Register git_add tool
-  api.registerTool({
+  pi.registerTool({
     name: 'git_add',
+    label: 'Git Add',
     description: 'Stage files for commit. Use "git add" semantics.',
-    parameters: {
-      type: 'object',
-      properties: {
-        files: {
-          type: 'array',
-          items: { type: 'string' },
-          description: 'Files to stage (can use "." for all)'
-        },
-        cwd: {
-          type: 'string',
-          description: 'Working directory'
-        }
-      },
-      required: ['files']
-    },
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    parameters: Type.Object({
+      files: Type.Array(Type.String(), { description: 'Files to stage (can use "." for all)' }),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: { files?: string[]; cwd?: string },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
       try {
         const files = params?.files;
         if (!files || files.length === 0) {
           return {
             content: [{ type: 'text', text: '**Git Add Failed**\n\nNo files specified. Use ["."] to stage all changes.' }],
+            details: {},
             isError: true
           };
         }
@@ -1445,15 +1682,18 @@ module.exports = function(api) {
         if (!result.success) {
           return {
             content: [{ type: 'text', text: `**Git Add Failed**\n\n${result.error}` }],
+            details: {},
             isError: true
           };
         }
 
         const text = `**Files Staged**\n\nStaged ${result.staged.length} file(s):\n${result.staged.map(f => `- ${f}`).join('\n')}`;
-        return { content: [{ type: 'text', text }] };
+        return { content: [{ type: 'text', text }], details: {} };
       } catch (error) {
+        const err = error as Error;
         return {
-          content: [{ type: 'text', text: `**Git Add Failed**\n\n${error.message}` }],
+          content: [{ type: 'text', text: `**Git Add Failed**\n\n${err.message}` }],
+          details: {},
           isError: true
         };
       }
@@ -1461,29 +1701,27 @@ module.exports = function(api) {
   });
 
   // Register git_commit tool
-  api.registerTool({
+  pi.registerTool({
     name: 'git_commit',
+    label: 'Git Commit',
     description: 'Create a git commit with a conventional commit message. For complex changes, provide a body explaining what changed, why, and the impact.',
-    parameters: {
-      type: 'object',
-      properties: {
-        message: {
-          type: 'string',
-          description: 'Commit message. For simple changes: "type(scope): description". For complex changes: "type(scope): summary" followed by detailed body explaining what changed across which files, why, and the impact.'
-        },
-        cwd: {
-          type: 'string',
-          description: 'Working directory'
-        }
-      },
-      required: ['message']
-    },
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    parameters: Type.Object({
+      message: Type.String({ description: 'Commit message. For simple changes: "type(scope): description". For complex changes: "type(scope): summary" followed by detailed body explaining what changed across which files, why, and the impact.' }),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: { message?: string; cwd?: string },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
       try {
         const message = params?.message;
         if (!message || typeof message !== 'string' || message.trim() === '') {
           return {
             content: [{ type: 'text', text: '**Git Commit Failed**\n\nCommit message is required.\n\nFor simple changes:\n  "type(scope): description"\n\nFor complex changes (3+ files, non-obvious changes):\n  "type(scope): summary"\n\n  "What changed:\n  - File A: did X\n  - File B: did Y\n\n  Why: the problem this solves\n\n  Impact: behavioral or API changes"' }],
+            details: {},
             isError: true
           };
         }
@@ -1493,6 +1731,7 @@ module.exports = function(api) {
         if (!result.success) {
           return {
             content: [{ type: 'text', text: `**Git Commit Failed**\n\n${result.error}` }],
+            details: {},
             isError: true
           };
         }
@@ -1500,10 +1739,12 @@ module.exports = function(api) {
         const text = result.isDetailed
           ? `**Commit Created (detailed)**\n\n**Branch:** \`${result.branch}\`\n**Hash:** \`${result.hash}\`\n**Summary:** ${result.message}\n\nFull message includes body with change details.`
           : `**Commit Created**\n\n**Branch:** \`${result.branch}\`\n**Hash:** \`${result.hash}\`\n**Message:** ${result.message}`;
-        return { content: [{ type: 'text', text }] };
+        return { content: [{ type: 'text', text }], details: {} };
       } catch (error) {
+        const err = error as Error;
         return {
-          content: [{ type: 'text', text: `**Git Commit Failed**\n\n${error.message}` }],
+          content: [{ type: 'text', text: `**Git Commit Failed**\n\n${err.message}` }],
+          details: {},
           isError: true
         };
       }
@@ -1511,47 +1752,41 @@ module.exports = function(api) {
   });
 
   // Register git_branch tool
-  api.registerTool({
+  pi.registerTool({
     name: 'git_branch',
+    label: 'Git Branch',
     description: 'Branch operations: list, create, switch, delete, force_delete, merge.',
-    parameters: {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          description: 'Action: list, create, switch, delete, force_delete, merge',
-          enum: ['list', 'create', 'switch', 'delete', 'force_delete', 'merge']
-        },
-        name: {
-          type: 'string',
-          description: 'Branch name (required for create, switch, delete, force_delete, merge)'
-        },
-        cwd: {
-          type: 'string',
-          description: 'Working directory'
-        }
-      },
-      required: ['action']
-    },
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    parameters: Type.Object({
+      action: Type.String({ description: 'Action: list, create, switch, delete, force_delete, merge', enum: ['list', 'create', 'switch', 'delete', 'force_delete', 'merge'] }),
+      name: Type.Optional(Type.String({ description: 'Branch name (required for create, switch, delete, force_delete, merge)' })),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: { action?: string; name?: string; cwd?: string },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
       try {
-        const result = await gitBranch(params?.action, params?.name, params?.cwd);
+        const result = await gitBranch(params?.action || '', params?.name, params?.cwd);
 
         if (!result.success) {
           const hint = result.hint ? `\n\n${result.hint}` : '';
           return {
             content: [{ type: 'text', text: `**Git Branch Failed**\n\n${result.error}${hint}` }],
+            details: {},
             isError: true
           };
         }
 
-        let text;
+        let text: string;
         switch (params?.action) {
           case 'list':
             text = formatBranches(result);
             break;
           case 'create':
-            text = `**Branch Created**\n\nCreated and switched to branch: \`${result.branch}\``;
+            text = `**Branch Created**\n\nCreated branch: \`${result.branch}\``;
             break;
           case 'switch':
             text = `**Branch Switched**\n\nNow on branch: \`${result.branch}\``;
@@ -1567,10 +1802,12 @@ module.exports = function(api) {
             text = `**Git Branch Operation Completed**`;
         }
 
-        return { content: [{ type: 'text', text }] };
+        return { content: [{ type: 'text', text }], details: {} };
       } catch (error) {
+        const err = error as Error;
         return {
-          content: [{ type: 'text', text: `**Git Branch Failed**\n\n${error.message}` }],
+          content: [{ type: 'text', text: `**Git Branch Failed**\n\n${err.message}` }],
+          details: {},
           isError: true
         };
       }
@@ -1578,31 +1815,30 @@ module.exports = function(api) {
   });
 
   // Register git_log tool
-  api.registerTool({
+  pi.registerTool({
     name: 'git_log',
+    label: 'Git Log',
     description: 'View commit history.',
-    parameters: {
-      type: 'object',
-      properties: {
-        count: {
-          type: 'number',
-          description: 'Number of commits to show (default: 10)',
-          default: 10
-        },
-        cwd: {
-          type: 'string',
-          description: 'Working directory'
-        }
-      }
-    },
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    parameters: Type.Object({
+      count: Type.Optional(Type.Number({ description: 'Number of commits to show (default: 10)' })),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: { count?: number; cwd?: string },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
       try {
         const result = await gitLog(params?.count || 10, params?.cwd);
         const text = formatLog(result);
-        return { content: [{ type: 'text', text }] };
+        return { content: [{ type: 'text', text }], details: {} };
       } catch (error) {
+        const err = error as Error;
         return {
-          content: [{ type: 'text', text: `**Git Log Failed**\n\n${error.message}` }],
+          content: [{ type: 'text', text: `**Git Log Failed**\n\n${err.message}` }],
+          details: {},
           isError: true
         };
       }
@@ -1610,46 +1846,40 @@ module.exports = function(api) {
   });
 
   // Register git_stash tool
-  api.registerTool({
+  pi.registerTool({
     name: 'git_stash',
+    label: 'Git Stash',
     description: 'Stash operations: save, list, pop, apply, drop, clear, show.',
-    parameters: {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          description: 'Action: save, list, pop, apply, drop, clear, show',
-          enum: ['save', 'list', 'pop', 'apply', 'drop', 'clear', 'show']
-        },
-        index: {
-          type: 'number',
-          description: 'Stash index (optional, defaults to latest)'
-        },
-        cwd: {
-          type: 'string',
-          description: 'Working directory'
-        }
-      },
-      required: ['action']
-    },
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    parameters: Type.Object({
+      action: Type.String({ description: 'Action: save, list, pop, apply, drop, clear, show', enum: ['save', 'list', 'pop', 'apply', 'drop', 'clear', 'show'] }),
+      index: Type.Optional(Type.Number({ description: 'Stash index (optional, defaults to latest)' })),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: { action?: string; index?: number; cwd?: string },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
       try {
-        const result = await gitStash(params?.action, params?.cwd, params?.index);
+        const result = await gitStash(params?.action || '', params?.cwd, params?.index ?? null);
 
         if (!result.success) {
           return {
             content: [{ type: 'text', text: `**Git Stash Failed**\n\n${result.error}` }],
+            details: {},
             isError: true
           };
         }
 
-        let text;
+        let text: string;
         switch (params?.action) {
           case 'save':
             text = `**Changes Stashed**\n\n${result.summary}`;
             break;
           case 'list':
-            text = `**Stash List** (${result.count})\n\n${result.stashes.join('\n')}`;
+            text = `**Stash List** (${result.count})\n\n${result.stashes?.join('\n')}`;
             break;
           case 'pop':
             text = `**Stash Popped**\n\n${result.summary}`;
@@ -1670,10 +1900,12 @@ module.exports = function(api) {
             text = `**Git Stash Operation Completed**`;
         }
 
-        return { content: [{ type: 'text', text }] };
+        return { content: [{ type: 'text', text }], details: {} };
       } catch (error) {
+        const err = error as Error;
         return {
-          content: [{ type: 'text', text: `**Git Stash Failed**\n\n${error.message}` }],
+          content: [{ type: 'text', text: `**Git Stash Failed**\n\n${err.message}` }],
+          details: {},
           isError: true
         };
       }
@@ -1681,49 +1913,42 @@ module.exports = function(api) {
   });
 
   // Register git_push tool
-  api.registerTool({
+  pi.registerTool({
     name: 'git_push',
+    label: 'Git Push',
     description: 'Push commits to a remote repository.',
-    parameters: {
-      type: 'object',
-      properties: {
-        remote: {
-          type: 'string',
-          description: 'Remote name (default: origin)',
-          default: 'origin'
-        },
-        branch: {
-          type: 'string',
-          description: 'Branch name to push (optional, pushes current branch if not specified)'
-        },
-        force: {
-          type: 'boolean',
-          description: 'Force push with lease (use with caution)',
-          default: false
-        },
-        cwd: {
-          type: 'string',
-          description: 'Working directory'
-        }
-      }
-    },
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    parameters: Type.Object({
+      remote: Type.Optional(Type.String({ description: 'Remote name (default: origin)' })),
+      branch: Type.Optional(Type.String({ description: 'Branch name to push (optional, pushes current branch if not specified)' })),
+      force: Type.Optional(Type.Boolean({ description: 'Force push with lease (use with caution)' })),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: { remote?: string; branch?: string; force?: boolean; cwd?: string },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
       try {
-        const result = await gitPush(params?.remote, params?.branch, params?.cwd, params?.force);
+        const result = await gitPush(params?.remote, params?.branch ?? null, params?.cwd, params?.force || false);
 
         if (!result.success) {
           return {
             content: [{ type: 'text', text: `**Git Push Failed**\n\n${result.error}` }],
+            details: {},
             isError: true
           };
         }
 
         const branchInfo = result.branch ? ` branch \`${result.branch}\`` : ' current branch';
         const text = `**Pushed to Remote**\n\nPushed${branchInfo} to \`${result.remote}\`\n\n${result.summary}`;
-        return { content: [{ type: 'text', text }] };
+        return { content: [{ type: 'text', text }], details: {} };
       } catch (error) {
+        const err = error as Error;
         return {
-          content: [{ type: 'text', text: `**Git Push Failed**\n\n${error.message}` }],
+          content: [{ type: 'text', text: `**Git Push Failed**\n\n${err.message}` }],
+          details: {},
           isError: true
         };
       }
@@ -1731,44 +1956,41 @@ module.exports = function(api) {
   });
 
   // Register git_pull tool
-  api.registerTool({
+  pi.registerTool({
     name: 'git_pull',
+    label: 'Git Pull',
     description: 'Pull changes from a remote repository.',
-    parameters: {
-      type: 'object',
-      properties: {
-        remote: {
-          type: 'string',
-          description: 'Remote name (default: origin)',
-          default: 'origin'
-        },
-        branch: {
-          type: 'string',
-          description: 'Branch name to pull (optional, pulls current branch if not specified)'
-        },
-        cwd: {
-          type: 'string',
-          description: 'Working directory'
-        }
-      }
-    },
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    parameters: Type.Object({
+      remote: Type.Optional(Type.String({ description: 'Remote name (default: origin)' })),
+      branch: Type.Optional(Type.String({ description: 'Branch name to pull (optional, pulls current branch if not specified)' })),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: { remote?: string; branch?: string; cwd?: string },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
       try {
-        const result = await gitPull(params?.remote, params?.branch, params?.cwd);
+        const result = await gitPull(params?.remote, params?.branch ?? null, params?.cwd);
 
         if (!result.success) {
           return {
             content: [{ type: 'text', text: `**Git Pull Failed**\n\n${result.error}` }],
+            details: {},
             isError: true
           };
         }
 
         const branchInfo = result.branch ? ` branch \`${result.branch}\`` : ' current branch';
         const text = `**Pulled from Remote**\n\nPulled${branchInfo} from \`${result.remote}\`\n\n${result.summary}`;
-        return { content: [{ type: 'text', text }] };
+        return { content: [{ type: 'text', text }], details: {} };
       } catch (error) {
+        const err = error as Error;
         return {
-          content: [{ type: 'text', text: `**Git Pull Failed**\n\n${error.message}` }],
+          content: [{ type: 'text', text: `**Git Pull Failed**\n\n${err.message}` }],
+          details: {},
           isError: true
         };
       }
@@ -1776,44 +1998,35 @@ module.exports = function(api) {
   });
 
   // Register git_remote tool
-  api.registerTool({
+  pi.registerTool({
     name: 'git_remote',
+    label: 'Git Remote',
     description: 'Remote repository management: list, add, remove, set-url.',
-    parameters: {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          description: 'Action: list, add, remove, set-url',
-          enum: ['list', 'add', 'remove', 'set-url']
-        },
-        name: {
-          type: 'string',
-          description: 'Remote name (required for add, remove, set-url)'
-        },
-        url: {
-          type: 'string',
-          description: 'Remote URL (required for add, set-url)'
-        },
-        cwd: {
-          type: 'string',
-          description: 'Working directory'
-        }
-      },
-      required: ['action']
-    },
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    parameters: Type.Object({
+      action: Type.String({ description: 'Action: list, add, remove, set-url', enum: ['list', 'add', 'remove', 'set-url'] }),
+      name: Type.Optional(Type.String({ description: 'Remote name (required for add, remove, set-url)' })),
+      url: Type.Optional(Type.String({ description: 'Remote URL (required for add, set-url)' })),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: { action?: string; name?: string; url?: string; cwd?: string },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
       try {
-        const result = await gitRemote(params?.action, params?.name, params?.url, params?.cwd);
+        const result = await gitRemote(params?.action || '', params?.name, params?.url, params?.cwd);
 
         if (!result.success) {
           return {
             content: [{ type: 'text', text: `**Git Remote Failed**\n\n${result.error}` }],
+            details: {},
             isError: true
           };
         }
 
-        let text;
+        let text: string;
         switch (params?.action) {
           case 'list':
             text = formatRemotes(result);
@@ -1831,10 +2044,12 @@ module.exports = function(api) {
             text = `**Git Remote Operation Completed**`;
         }
 
-        return { content: [{ type: 'text', text }] };
+        return { content: [{ type: 'text', text }], details: {} };
       } catch (error) {
+        const err = error as Error;
         return {
-          content: [{ type: 'text', text: `**Git Remote Failed**\n\n${error.message}` }],
+          content: [{ type: 'text', text: `**Git Remote Failed**\n\n${err.message}` }],
+          details: {},
           isError: true
         };
       }
@@ -1842,45 +2057,40 @@ module.exports = function(api) {
   });
 
   // Register git_reset tool
-  api.registerTool({
+  pi.registerTool({
     name: 'git_reset',
+    label: 'Git Reset',
     description: 'Reset current HEAD to specified state. Modes: soft (keep changes staged), mixed (keep changes unstaged), hard (discard changes).',
-    parameters: {
-      type: 'object',
-      properties: {
-        mode: {
-          type: 'string',
-          description: 'Reset mode: soft, mixed, hard',
-          enum: ['soft', 'mixed', 'hard'],
-          default: 'mixed'
-        },
-        target: {
-          type: 'string',
-          description: 'Target commit (default: HEAD)',
-          default: 'HEAD'
-        },
-        cwd: {
-          type: 'string',
-          description: 'Working directory'
-        }
-      }
-    },
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    parameters: Type.Object({
+      mode: Type.Optional(Type.String({ description: 'Reset mode: soft, mixed, hard', enum: ['soft', 'mixed', 'hard'] })),
+      target: Type.Optional(Type.String({ description: 'Target commit (default: HEAD)' })),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: { mode?: string; target?: string; cwd?: string },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
       try {
         const result = await gitReset(params?.mode || 'mixed', params?.target || 'HEAD', params?.cwd);
 
         if (!result.success) {
           return {
             content: [{ type: 'text', text: `**Git Reset Failed**\n\n${result.error}` }],
+            details: {},
             isError: true
           };
         }
 
         const text = `**Git Reset Completed**\n\nMode: \`${result.mode}\`\nTarget: \`${result.target}\``;
-        return { content: [{ type: 'text', text }] };
+        return { content: [{ type: 'text', text }], details: {} };
       } catch (error) {
+        const err = error as Error;
         return {
-          content: [{ type: 'text', text: `**Git Reset Failed**\n\n${error.message}` }],
+          content: [{ type: 'text', text: `**Git Reset Failed**\n\n${err.message}` }],
+          details: {},
           isError: true
         };
       }
@@ -1888,60 +2098,44 @@ module.exports = function(api) {
   });
 
   // Register git_tag tool
-  api.registerTool({
+  pi.registerTool({
     name: 'git_tag',
+    label: 'Git Tag',
     description: 'Tag management: list, create, delete, push, push-all.',
-    parameters: {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          description: 'Action: list, create, delete, push, push-all',
-          enum: ['list', 'create', 'delete', 'push', 'push-all']
-        },
-        name: {
-          type: 'string',
-          description: 'Tag name (required for create, delete, push)'
-        },
-        target: {
-          type: 'string',
-          description: 'Target commit (for create)'
-        },
-        message: {
-          type: 'string',
-          description: 'Tag message (for annotated tags)'
-        },
-        remote: {
-          type: 'string',
-          description: 'Remote name (for push, default: origin)',
-          default: 'origin'
-        },
-        cwd: {
-          type: 'string',
-          description: 'Working directory'
-        }
-      },
-      required: ['action']
-    },
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    parameters: Type.Object({
+      action: Type.String({ description: 'Action: list, create, delete, push, push-all', enum: ['list', 'create', 'delete', 'push', 'push-all'] }),
+      name: Type.Optional(Type.String({ description: 'Tag name (required for create, delete, push)' })),
+      target: Type.Optional(Type.String({ description: 'Target commit (for create)' })),
+      message: Type.Optional(Type.String({ description: 'Tag message (for annotated tags)' })),
+      remote: Type.Optional(Type.String({ description: 'Remote name (for push, default: origin)' })),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: { action?: string; name?: string; target?: string; message?: string; remote?: string; cwd?: string },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
       try {
-        const options = {
+        const options: TagOptions = {
           message: params?.message,
           remote: params?.remote
         };
-        const result = await gitTag(params?.action, params?.name, params?.target, params?.cwd, options);
+        const result = await gitTag(params?.action || '', params?.name, params?.target, params?.cwd, options);
 
         if (!result.success) {
           return {
             content: [{ type: 'text', text: `**Git Tag Failed**\n\n${result.error}` }],
+            details: {},
             isError: true
           };
         }
 
-        let text;
+        let text: string;
         switch (params?.action) {
           case 'list':
-            text = `**Tags** (${result.count})\n\n${result.tags.join('\n')}`;
+            text = `**Tags** (${result.count})\n\n${result.tags?.join('\n')}`;
             break;
           case 'create':
             text = `**Tag Created**\n\nTag: \`${result.tag}\`\nTarget: \`${result.target}\``;
@@ -1959,10 +2153,12 @@ module.exports = function(api) {
             text = `**Git Tag Operation Completed**`;
         }
 
-        return { content: [{ type: 'text', text }] };
+        return { content: [{ type: 'text', text }], details: {} };
       } catch (error) {
+        const err = error as Error;
         return {
-          content: [{ type: 'text', text: `**Git Tag Failed**\n\n${error.message}` }],
+          content: [{ type: 'text', text: `**Git Tag Failed**\n\n${err.message}` }],
+          details: {},
           isError: true
         };
       }
@@ -1970,40 +2166,34 @@ module.exports = function(api) {
   });
 
   // Register git_rebase tool
-  api.registerTool({
+  pi.registerTool({
     name: 'git_rebase',
+    label: 'Git Rebase',
     description: 'Rebase operations: start, continue, abort, skip.',
-    parameters: {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          description: 'Action: start, continue, abort, skip',
-          enum: ['start', 'continue', 'abort', 'skip']
-        },
-        target: {
-          type: 'string',
-          description: 'Target branch/commit (for start action)'
-        },
-        cwd: {
-          type: 'string',
-          description: 'Working directory'
-        }
-      },
-      required: ['action']
-    },
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    parameters: Type.Object({
+      action: Type.String({ description: 'Action: start, continue, abort, skip', enum: ['start', 'continue', 'abort', 'skip'] }),
+      target: Type.Optional(Type.String({ description: 'Target branch/commit (for start action)' })),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: { action?: string; target?: string; cwd?: string },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
       try {
-        const result = await gitRebase(params?.action, params?.target, params?.cwd);
+        const result = await gitRebase(params?.action || '', params?.target, params?.cwd);
 
         if (!result.success) {
           return {
             content: [{ type: 'text', text: `**Git Rebase Failed**\n\n${result.error}` }],
+            details: {},
             isError: true
           };
         }
 
-        let text;
+        let text: string;
         switch (params?.action) {
           case 'start':
             text = `**Rebase Started**\n\nRebasing onto \`${result.target}\``;
@@ -2021,10 +2211,12 @@ module.exports = function(api) {
             text = `**Git Rebase Operation Completed**`;
         }
 
-        return { content: [{ type: 'text', text }] };
+        return { content: [{ type: 'text', text }], details: {} };
       } catch (error) {
+        const err = error as Error;
         return {
-          content: [{ type: 'text', text: `**Git Rebase Failed**\n\n${error.message}` }],
+          content: [{ type: 'text', text: `**Git Rebase Failed**\n\n${err.message}` }],
+          details: {},
           isError: true
         };
       }
@@ -2032,36 +2224,25 @@ module.exports = function(api) {
   });
 
   // Register git_cherry_pick tool
-  api.registerTool({
+  pi.registerTool({
     name: 'git_cherry_pick',
+    label: 'Git Cherry Pick',
     description: 'Cherry pick commits from other branches.',
-    parameters: {
-      type: 'object',
-      properties: {
-        commit: {
-          type: 'string',
-          description: 'Commit hash to cherry pick'
-        },
-        noCommit: {
-          type: 'boolean',
-          description: 'Stage changes without committing',
-          default: false
-        },
-        signoff: {
-          type: 'boolean',
-          description: 'Add Signed-off-by line',
-          default: false
-        },
-        cwd: {
-          type: 'string',
-          description: 'Working directory'
-        }
-      },
-      required: ['commit']
-    },
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    parameters: Type.Object({
+      commit: Type.String({ description: 'Commit hash to cherry pick' }),
+      noCommit: Type.Optional(Type.Boolean({ description: 'Stage changes without committing' })),
+      signoff: Type.Optional(Type.Boolean({ description: 'Add Signed-off-by line' })),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: { commit?: string; noCommit?: boolean; signoff?: boolean; cwd?: string },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
       try {
-        const result = await gitCherryPick(params?.commit, params?.cwd, {
+        const result = await gitCherryPick(params?.commit || '', params?.cwd, {
           noCommit: params?.noCommit || false,
           signoff: params?.signoff || false
         });
@@ -2069,15 +2250,18 @@ module.exports = function(api) {
         if (!result.success) {
           return {
             content: [{ type: 'text', text: `**Git Cherry Pick Failed**\n\n${result.error}` }],
+            details: {},
             isError: true
           };
         }
 
         const text = `**Cherry Picked**\n\nCommit: \`${result.commit}\`\n\n${result.summary}`;
-        return { content: [{ type: 'text', text }] };
+        return { content: [{ type: 'text', text }], details: {} };
       } catch (error) {
+        const err = error as Error;
         return {
-          content: [{ type: 'text', text: `**Git Cherry Pick Failed**\n\n${error.message}` }],
+          content: [{ type: 'text', text: `**Git Cherry Pick Failed**\n\n${err.message}` }],
+          details: {},
           isError: true
         };
       }
@@ -2085,36 +2269,25 @@ module.exports = function(api) {
   });
 
   // Register git_blame tool
-  api.registerTool({
+  pi.registerTool({
     name: 'git_blame',
+    label: 'Git Blame',
     description: 'Show line-by-line annotation of a file.',
-    parameters: {
-      type: 'object',
-      properties: {
-        file: {
-          type: 'string',
-          description: 'File to blame'
-        },
-        lineNumbers: {
-          type: 'boolean',
-          description: 'Show line numbers',
-          default: false
-        },
-        email: {
-          type: 'boolean',
-          description: 'Show email addresses instead of author names',
-          default: false
-        },
-        cwd: {
-          type: 'string',
-          description: 'Working directory'
-        }
-      },
-      required: ['file']
-    },
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    parameters: Type.Object({
+      file: Type.String({ description: 'File to blame' }),
+      lineNumbers: Type.Optional(Type.Boolean({ description: 'Show line numbers' })),
+      email: Type.Optional(Type.Boolean({ description: 'Show email addresses instead of author names' })),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: { file?: string; lineNumbers?: boolean; email?: boolean; cwd?: string },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
       try {
-        const result = await gitBlame(params?.file, params?.cwd, {
+        const result = await gitBlame(params?.file || '', params?.cwd, {
           lineNumbers: params?.lineNumbers || false,
           email: params?.email || false
         });
@@ -2122,15 +2295,18 @@ module.exports = function(api) {
         if (!result.success) {
           return {
             content: [{ type: 'text', text: `**Git Blame Failed**\n\n${result.error}` }],
+            details: {},
             isError: true
           };
         }
 
         const text = `**Blame for ${result.file}**\n\n\`\`\`\n${result.blame}\n\`\`\``;
-        return { content: [{ type: 'text', text }] };
+        return { content: [{ type: 'text', text }], details: {} };
       } catch (error) {
+        const err = error as Error;
         return {
-          content: [{ type: 'text', text: `**Git Blame Failed**\n\n${error.message}` }],
+          content: [{ type: 'text', text: `**Git Blame Failed**\n\n${err.message}` }],
+          details: {},
           isError: true
         };
       }
@@ -2138,40 +2314,26 @@ module.exports = function(api) {
   });
 
   // Register git_show tool
-  api.registerTool({
+  pi.registerTool({
     name: 'git_show',
+    label: 'Git Show',
     description: 'Show commit details.',
-    parameters: {
-      type: 'object',
-      properties: {
-        commit: {
-          type: 'string',
-          description: 'Commit hash or reference'
-        },
-        file: {
-          type: 'string',
-          description: 'Show specific file from commit'
-        },
-        stat: {
-          type: 'boolean',
-          description: 'Show diffstat instead of full diff',
-          default: false
-        },
-        nameOnly: {
-          type: 'boolean',
-          description: 'Show only filenames changed',
-          default: false
-        },
-        cwd: {
-          type: 'string',
-          description: 'Working directory'
-        }
-      },
-      required: ['commit']
-    },
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    parameters: Type.Object({
+      commit: Type.String({ description: 'Commit hash or reference' }),
+      file: Type.Optional(Type.String({ description: 'Show specific file from commit' })),
+      stat: Type.Optional(Type.Boolean({ description: 'Show diffstat instead of full diff' })),
+      nameOnly: Type.Optional(Type.Boolean({ description: 'Show only filenames changed' })),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: { commit?: string; file?: string; stat?: boolean; nameOnly?: boolean; cwd?: string },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
       try {
-        const result = await gitShow(params?.commit, params?.cwd, {
+        const result = await gitShow(params?.commit || '', params?.cwd, {
           file: params?.file,
           stat: params?.stat || false,
           nameOnly: params?.nameOnly || false
@@ -2180,19 +2342,21 @@ module.exports = function(api) {
         if (!result.success) {
           return {
             content: [{ type: 'text', text: `**Git Show Failed**\n\n${result.error}` }],
+            details: {},
             isError: true
           };
         }
 
         const text = `**Commit ${result.commit}**\n\n\`\`\`\n${result.output}\n\`\`\``;
-        return { content: [{ type: 'text', text }] };
+        return { content: [{ type: 'text', text }], details: {} };
       } catch (error) {
+        const err = error as Error;
         return {
-          content: [{ type: 'text', text: `**Git Show Failed**\n\n${error.message}` }],
+          content: [{ type: 'text', text: `**Git Show Failed**\n\n${err.message}` }],
+          details: {},
           isError: true
         };
       }
     }
   });
-
 };
