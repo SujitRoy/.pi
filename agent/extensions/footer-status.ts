@@ -1,63 +1,112 @@
 /**
- * PI Agent Extension: Footer Status (Enhanced)
+ * PI Agent Extension: Powerline Footer (Multicolor)
  *
- * Displays rich status information in the Pi CLI footer via setStatus().
- * The built-in footer renders extension statuses on a dedicated line below
- * the main stats (pwd, branch, tokens, model, context %).
+ * Replaces the built-in footer with a custom multicolor component using
+ * setFooter(). Shows all built-in info (pwd, branch, tokens, model,
+ * context %) PLUS enhanced session stats with semantic theme coloring.
  *
- * Shows:
- * - Hostname (user@host)
- * - Current time (HH:MM)
- * - Current git branch (with detached HEAD support)
- * - Working directory (with ~ shorthand)
- * - Git file stats: staged (+N), modified (*N), untracked (?N), deleted (-N)
- * - Context usage: ctx:45.5% 58k/128k
- * - Model name + thinking level
- * - Session name + session ID
- * - Turn count
- * - Cumulative tokens: ↑input ↓output =total Rcache Wcache
- * - Cumulative cost ($N.NNN)
- * - Compaction indicator
+ * Segments (colored via Pi theme):
+ * [branch] path  |  +N *M ?U -D  |  ctx:45% 58k/128k  |  model thinking:level  |
+ * up-input down-output =total Rcache Wcache  |  $0.012  |  session:name  |  turns:N
  *
- * Updates dynamically on agent_end, session_compact, and tool_result events.
+ * Updates dynamically on agent_end, session_compact, model_select, tool_result.
+ * Thinking level is live-synced via pi.getThinkingLevel().
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  ReadonlyFooterDataProvider,
+  Theme,
+} from "@mariozechner/pi-coding-agent";
 import { execSync } from "child_process";
 import * as path from "path";
+
+/** Minimal Component interface (mirrors pi-tui Component) */
+interface Component {
+  render(width: number): string[];
+  dispose?(): void;
+}
+
+/** Minimal TUI type (used only as type parameter, not accessed) */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type TUI = any;
 
 // ============================================================================
 // Configuration
 // ============================================================================
 
-/** Separator character between segments. Use powerline chars if your font supports them: \uE0B1 \uE0B3 \u2022 */
-const SEP = " | ";
-
-/** Path display mode: "full" | "abbreviated" | "basename" */
 const PATH_MODE: "full" | "abbreviated" | "basename" = "abbreviated";
-
-/** Include cumulative token stats in footer (default footer shows per-turn, this shows session total) */
-const SHOW_TOKENS = true;
-
-/** Include cost in footer */
+const SHOW_SESSION_TOKENS = true;
 const SHOW_COST = true;
+const SHOW_SESSION_NAME = true;
+const SHOW_TURNS = true;
+const SHOW_EXTENSION_STATUSES = true;
 
-/** Include hostname */
-const SHOW_HOSTNAME = false;
+// ============================================================================
+// Shared state (updated by event handlers, read by footer render)
+// ============================================================================
 
-/** Include current time */
-const SHOW_TIME = false;
+interface FooterState {
+  cwd: string;
+  branch: string | null;
+  staged: number;
+  modified: number;
+  untracked: number;
+  deleted: number;
+  renamed: number;
+  turns: number;
+  totalInput: number;
+  totalOutput: number;
+  totalCacheRead: number;
+  totalCacheWrite: number;
+  totalCost: number;
+  contextPercent: number | null;
+  contextTokens: number | null;
+  contextWindow: number;
+  modelName: string;
+  thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "n/a";
+  supportsThinking: boolean;
+  sessionName: string | null;
+  isCompacting: boolean;
+  hasData: boolean;
+}
 
-/** Include session ID */
-const SHOW_SESSION_ID = false;
+const state: FooterState = {
+  cwd: process.cwd(),
+  branch: null,
+  staged: 0,
+  modified: 0,
+  untracked: 0,
+  deleted: 0,
+  renamed: 0,
+  turns: 0,
+  totalInput: 0,
+  totalOutput: 0,
+  totalCacheRead: 0,
+  totalCacheWrite: 0,
+  totalCost: 0,
+  contextPercent: null,
+  contextTokens: null,
+  contextWindow: 0,
+  modelName: "no-model",
+  thinkingLevel: "off",
+  supportsThinking: false,
+  sessionName: null,
+  isCompacting: false,
+  hasData: false,
+};
+
+// Theme reference (set by footer factory, used by component render)
+let currentTheme: Theme | null = null;
+
+// Footer data reference (set by footer factory)
+let currentFooterData: ReadonlyFooterDataProvider | null = null;
 
 // ============================================================================
 // Git Helpers
 // ============================================================================
 
-/**
- * Get the current git branch
- */
 function getGitBranch(cwd: string): string | null {
   try {
     const branch = execSync("git branch --show-current", {
@@ -66,8 +115,6 @@ function getGitBranch(cwd: string): string | null {
       encoding: "utf8",
     }).trim();
     if (branch) return branch;
-
-    // Check for detached HEAD
     const head = execSync("git rev-parse --short HEAD", {
       cwd,
       timeout: 2000,
@@ -79,45 +126,31 @@ function getGitBranch(cwd: string): string | null {
   }
 }
 
-/**
- * Count file changes in the working directory
- */
-function getWorkingTreeStats(cwd: string): {
-  staged: number;
-  modified: number;
-  untracked: number;
-  deleted: number;
-  renamed: number;
-} {
+function getWorkingTreeStats(cwd: string) {
   try {
     const output = execSync("git status --porcelain", {
       cwd,
       timeout: 2000,
       encoding: "utf8",
     });
-
     const lines = output.split("\n").filter((l: string) => l.trim());
     let staged = 0;
     let modified = 0;
     let untracked = 0;
     let deleted = 0;
     let renamed = 0;
-
     for (const line of lines) {
       if (line.length < 3) continue;
       const x = line[0];
       const y = line[1];
-
-      if (x === "?" && y === "?") {
-        untracked++;
-      } else {
+      if (x === "?" && y === "?") { untracked++; }
+      else {
         if (x !== " ") staged++;
         if (y === "M") modified++;
         if (y === "D") deleted++;
         if (x === "R" || y === "R") renamed++;
       }
     }
-
     return { staged, modified, untracked, deleted, renamed };
   } catch {
     return { staged: 0, modified: 0, untracked: 0, deleted: 0, renamed: 0 };
@@ -128,9 +161,6 @@ function getWorkingTreeStats(cwd: string): {
 // Formatting Helpers
 // ============================================================================
 
-/**
- * Format token counts like the built-in footer (1.2k, 45M, etc.)
- */
 function formatTokens(count: number): string {
   if (count < 1000) return count.toString();
   if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
@@ -139,9 +169,6 @@ function formatTokens(count: number): string {
   return `${Math.round(count / 1000000)}M`;
 }
 
-/**
- * Shorten a path by replacing home directory with ~
- */
 function shortenPath(p: string): string {
   const home = process.env.HOME || process.env.USERPROFILE;
   if (home && p.startsWith(home)) {
@@ -150,9 +177,6 @@ function shortenPath(p: string): string {
   return p;
 }
 
-/**
- * Format path according to PATH_MODE
- */
 function formatPath(p: string): string {
   const short = shortenPath(p);
   if (PATH_MODE === "basename") return path.basename(short);
@@ -166,54 +190,50 @@ function formatPath(p: string): string {
   return short;
 }
 
-/**
- * Get hostname
- */
-function getHostname(): string {
-  try {
-    const host = execSync("hostname -s", { timeout: 1000, encoding: "utf8" }).trim();
-    const user = process.env.USER || process.env.USERNAME || "user";
-    return `${user}@${host}`;
-  } catch {
-    return "unknown";
+function visibleWidth(s: string): number {
+  return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").length;
+}
+
+function truncateToWidth(s: string, maxW: number, ellipsis: string = "\u2026"): string {
+  if (visibleWidth(s) <= maxW) return s;
+  const raw = s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+  const ew = ellipsis.length;
+  if (maxW <= ew) return ellipsis.slice(0, maxW);
+  let result = "";
+  let w = 0;
+  for (const ch of raw) {
+    if (w + 1 > maxW - ew) break;
+    result += ch;
+    w++;
   }
+  return result + ellipsis;
 }
 
-/**
- * Get current time as HH:MM
- */
-function getTime(): string {
-  const now = new Date();
-  return now.toTimeString().slice(0, 5);
+function sanitizeStatusText(text: string): string {
+  return text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
 }
 
 // ============================================================================
-// Session Stats
+// State Refresher
 // ============================================================================
 
-/**
- * Compute cumulative session stats from entries
- */
-function getSessionStats(ctx: ExtensionContext): {
-  turns: number;
-  totalInput: number;
-  totalOutput: number;
-  totalCacheRead: number;
-  totalCacheWrite: number;
-  totalCost: number;
-  modelName: string;
-  thinkingLevel: string;
-} {
+function refreshState(ctx: ExtensionContext, api: ExtensionAPI) {
+  state.cwd = ctx.cwd;
+  state.branch = getGitBranch(ctx.cwd);
+  const stats = getWorkingTreeStats(ctx.cwd);
+  state.staged = stats.staged;
+  state.modified = stats.modified;
+  state.untracked = stats.untracked;
+  state.deleted = stats.deleted;
+  state.renamed = stats.renamed;
+
   let turns = 0;
   let totalInput = 0;
   let totalOutput = 0;
   let totalCacheRead = 0;
   let totalCacheWrite = 0;
   let totalCost = 0;
-
-  // Count turns and cumulative usage from session entries
-  const entries = ctx.sessionManager.getEntries();
-  for (const entry of entries) {
+  for (const entry of ctx.sessionManager.getEntries()) {
     if (entry.type === "message" && entry.message.role === "assistant") {
       turns++;
       totalInput += entry.message.usage.input || 0;
@@ -223,154 +243,166 @@ function getSessionStats(ctx: ExtensionContext): {
       totalCost += entry.message.usage.cost?.total || 0;
     }
   }
+  state.turns = turns;
+  state.totalInput = totalInput;
+  state.totalOutput = totalOutput;
+  state.totalCacheRead = totalCacheRead;
+  state.totalCacheWrite = totalCacheWrite;
+  state.totalCost = totalCost;
 
-  // Model info
-  const model = ctx.model;
-  const modelName = model?.id || "no-model";
+  const usage = ctx.getContextUsage();
+  state.contextPercent = usage?.percent ?? null;
+  state.contextTokens = usage?.tokens ?? null;
+  state.contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
 
-  // Thinking level - check if model supports reasoning
-  const thinkingLevel = (model as any)?.reasoning
-    ? ((ctx as any).state?.thinkingLevel || "off")
-    : "n/a";
+  state.modelName = ctx.model?.id || "no-model";
+  state.supportsThinking = !!(ctx.model as any)?.reasoning;
+  if (state.supportsThinking) {
+    try {
+      state.thinkingLevel = api.getThinkingLevel();
+    } catch {
+      state.thinkingLevel = "off";
+    }
+  } else {
+    state.thinkingLevel = "n/a";
+  }
 
-  return {
-    turns,
-    totalInput,
-    totalOutput,
-    totalCacheRead,
-    totalCacheWrite,
-    totalCost,
-    modelName,
-    thinkingLevel,
-  };
+  state.sessionName = SHOW_SESSION_NAME ? (ctx.sessionManager.getSessionName() ?? null) : null;
+  state.hasData = true;
 }
 
 // ============================================================================
-// Status Formatting
+// Footer Component
 // ============================================================================
 
-/**
- * Format the complete status text
- */
-function formatStatus(
-  ctx: ExtensionContext,
-  branch: string | null,
-  stats: { staged: number; modified: number; untracked: number; deleted: number; renamed: number },
-  sessionStats: {
-    turns: number;
-    totalInput: number;
-    totalOutput: number;
-    totalCacheRead: number;
-    totalCacheWrite: number;
-    totalCost: number;
-    modelName: string;
-    thinkingLevel: string;
-  },
-  contextPercent: number | null,
-  contextTokens: number | null,
-  contextWindow: number,
-  isCompacting: boolean,
-): string {
-  const parts: string[] = [];
+function createFooterComponent(): Component {
+  return {
+    render(width: number): string[] {
+      if (!state.hasData || !currentTheme) return [];
 
-  // Hostname (optional)
-  if (SHOW_HOSTNAME) {
-    parts.push(getHostname());
-  }
+      const t = currentTheme;
+      const dim = (s: string) => t.fg("dim", s);
+      const accent = (s: string) => t.fg("accent", s);
+      const muted = (s: string) => t.fg("muted", s);
+      const success = (s: string) => t.fg("success", s);
+      const warn = (s: string) => t.fg("warning", s);
+      const err = (s: string) => t.fg("error", s);
+      const thinkingClr = (s: string) => {
+        const m: Record<string, (x: string) => string> = {
+          off: t.fg.bind(t, "thinkingOff"),
+          minimal: t.fg.bind(t, "thinkingMinimal"),
+          low: t.fg.bind(t, "thinkingLow"),
+          medium: t.fg.bind(t, "thinkingMedium"),
+          high: t.fg.bind(t, "thinkingHigh"),
+          xhigh: t.fg.bind(t, "thinkingXhigh"),
+        };
+        return (m[state.thinkingLevel] ?? muted)(s);
+      };
 
-  // Time (optional)
-  if (SHOW_TIME) {
-    parts.push(getTime());
-  }
+      const SEP = dim(" \u2502 "); // │
 
-  // Path + branch
-  const formattedPath = formatPath(ctx.cwd);
-  if (branch) {
-    parts.push(`[${branch}] ${formattedPath}`);
-  } else {
-    parts.push(formattedPath);
-  }
+      // Build segments
+      const segs: string[] = [];
 
-  // Git file stats (powerline-style icons)
-  const gitParts: string[] = [];
-  if (stats.staged > 0) gitParts.push(`+${stats.staged}`);
-  if (stats.modified > 0) gitParts.push(`*${stats.modified}`);
-  if (stats.untracked > 0) gitParts.push(`?${stats.untracked}`);
-  if (stats.deleted > 0) gitParts.push(`-${stats.deleted}`);
-  if (stats.renamed > 0) gitParts.push(`R${stats.renamed}`);
+      // 1. [branch] path
+      const fp = formatPath(state.cwd);
+      if (state.branch) {
+        segs.push(`${accent(`[${state.branch}]`)} ${dim(fp)}`);
+      } else {
+        segs.push(dim(fp));
+      }
 
-  if (gitParts.length > 0) {
-    parts.push(gitParts.join(" "));
-  } else {
-    parts.push("clean");
-  }
+      // 2. Git stats
+      const gp: string[] = [];
+      if (state.staged > 0) gp.push(success(`+${state.staged}`));
+      if (state.modified > 0) gp.push(warn(`*${state.modified}`));
+      if (state.untracked > 0) gp.push(muted(`?${state.untracked}`));
+      if (state.deleted > 0) gp.push(err(`-${state.deleted}`));
+      if (state.renamed > 0) gp.push(accent(`R${state.renamed}`));
+      segs.push(gp.length > 0 ? gp.join(" ") : success("clean"));
 
-  // Context usage: ctx:45.5% 58k/128k
-  if (contextPercent !== null) {
-    const pctStr = contextPercent.toFixed(1);
-    const tokStr = contextTokens !== null ? ` ${formatTokens(contextTokens)}/${formatTokens(contextWindow)}` : "";
-    const warn = contextPercent > 80 ? "!!" : contextPercent > 60 ? "!" : "";
-    parts.push(`ctx:${pctStr}%${tokStr}${warn}`);
-  } else {
-    parts.push(`ctx:?/${formatTokens(contextWindow)}`);
-  }
+      // 3. Context usage
+      if (state.contextPercent !== null) {
+        const pct = state.contextPercent;
+        const pctCol = pct > 80 ? err : pct > 60 ? warn : muted;
+        const tokStr = state.contextTokens !== null
+          ? ` ${formatTokens(state.contextTokens)}/${formatTokens(state.contextWindow)}`
+          : "";
+        const w2 = pct > 80 ? err("!!") : pct > 60 ? warn("!") : "";
+        segs.push(`${pctCol(`ctx:${pct.toFixed(1)}%`)}${dim(tokStr)}${w2}`);
+      } else {
+        segs.push(muted(`ctx:?/${formatTokens(state.contextWindow)}`));
+      }
 
-  // Model + thinking level
-  if (sessionStats.thinkingLevel !== "n/a") {
-    const think = sessionStats.thinkingLevel === "off"
-      ? "thinking:off"
-      : sessionStats.thinkingLevel === "high" || sessionStats.thinkingLevel === "xhigh"
-        ? `thinking:${sessionStats.thinkingLevel}`
-        : `thinking:${sessionStats.thinkingLevel}`;
-    parts.push(`${sessionStats.modelName} ${think}`);
-  } else {
-    parts.push(sessionStats.modelName);
-  }
+      // 4. Model + thinking level
+      if (state.supportsThinking && state.thinkingLevel !== "n/a") {
+        const tl = state.thinkingLevel === "off" ? "thinking:off" : `thinking:${state.thinkingLevel}`;
+        segs.push(`${muted(state.modelName)} ${thinkingClr(tl)}`);
+      } else {
+        segs.push(muted(state.modelName));
+      }
 
-  // Token stats (cumulative session total)
-  if (SHOW_TOKENS && sessionStats.totalInput + sessionStats.totalOutput > 0) {
-    const t = sessionStats;
-    const tokenParts: string[] = [];
-    if (t.totalInput) tokenParts.push(`\u2191${formatTokens(t.totalInput)}`);
-    if (t.totalOutput) tokenParts.push(`\u2193${formatTokens(t.totalOutput)}`);
-    if (t.totalInput + t.totalOutput) tokenParts.push(`=${formatTokens(t.totalInput + t.totalOutput)}`);
-    if (t.totalCacheRead) tokenParts.push(`R${formatTokens(t.totalCacheRead)}`);
-    if (t.totalCacheWrite) tokenParts.push(`W${formatTokens(t.totalCacheWrite)}`);
-    if (tokenParts.length > 0) {
-      parts.push(tokenParts.join(" "));
-    }
-  }
+      // 5. Session tokens
+      if (SHOW_SESSION_TOKENS && (state.totalInput || state.totalOutput)) {
+        const tp: string[] = [];
+        if (state.totalInput) tp.push(`\u2191${formatTokens(state.totalInput)}`);
+        if (state.totalOutput) tp.push(`\u2193${formatTokens(state.totalOutput)}`);
+        if (state.totalInput + state.totalOutput) tp.push(`=${formatTokens(state.totalInput + state.totalOutput)}`);
+        if (state.totalCacheRead) tp.push(`R${formatTokens(state.totalCacheRead)}`);
+        if (state.totalCacheWrite) tp.push(`W${formatTokens(state.totalCacheWrite)}`);
+        segs.push(muted(tp.join(" ")));
+      }
 
-  // Cost
-  if (SHOW_COST && sessionStats.totalCost > 0) {
-    parts.push(`$${sessionStats.totalCost.toFixed(3)}`);
-  }
+      // 6. Cost
+      if (SHOW_COST && state.totalCost > 0) {
+        segs.push(accent(`$${state.totalCost.toFixed(3)}`));
+      }
 
-  // Session name
-  const sessionName = ctx.sessionManager.getSessionName();
-  if (sessionName) {
-    parts.push(`session:${sessionName}`);
-  }
+      // 7. Session name
+      if (state.sessionName) {
+        segs.push(muted(`session:${state.sessionName}`));
+      }
 
-  // Session ID (optional)
-  if (SHOW_SESSION_ID) {
-    const leafId = ctx.sessionManager.getLeafId?.();
-    if (leafId) {
-      parts.push(`id:${leafId.slice(0, 8)}`);
-    }
-  }
+      // 8. Turns
+      if (SHOW_TURNS && state.turns > 0) {
+        segs.push(muted(`turns:${state.turns}`));
+      }
 
-  // Turn count
-  if (sessionStats.turns > 0) {
-    parts.push(`turns:${sessionStats.turns}`);
-  }
+      // 9. Compaction
+      if (state.isCompacting) {
+        segs.push(warn("compacting..."));
+      }
 
-  // Compaction indicator
-  if (isCompacting) {
-    parts.push("compacting...");
-  }
+      // Join with separators
+      let line = segs.join(SEP);
 
-  return parts.join(SEP);
+      // Truncate if too wide
+      if (visibleWidth(line) > width) {
+        line = truncateToWidth(line, width);
+      }
+
+      const lines: string[] = [line];
+
+      // Extension statuses (from setStatus calls by other extensions)
+      if (SHOW_EXTENSION_STATUSES && currentFooterData) {
+        const extStatuses = currentFooterData.getExtensionStatuses();
+        if (extStatuses.size > 0) {
+          const sorted = Array.from(extStatuses.entries())
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([, text]) => sanitizeStatusText(text));
+          const extLine = sorted.join(" ");
+          lines.push(truncateToWidth(dim(extLine), width));
+        }
+      }
+
+      return lines;
+    },
+
+    dispose() {
+      currentTheme = null;
+      currentFooterData = null;
+    },
+  };
 }
 
 // ============================================================================
@@ -378,99 +410,73 @@ function formatStatus(
 // ============================================================================
 
 export default async function (pi: ExtensionAPI): Promise<void> {
-  const STATUS_KEY = "footer-status";
-
-  // State tracking
-  let isCompacting = false;
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-  let initialSet = false;
 
-  /**
-   * Refresh and update the footer status
-   */
-  async function refreshStatus(ctx: ExtensionContext) {
-    try {
-      const cwd = ctx.cwd;
-      const branch = getGitBranch(cwd);
-      const fileStats = getWorkingTreeStats(cwd);
-      const sessionStats = getSessionStats(ctx);
-      const contextUsage = ctx.getContextUsage();
-      const contextPercent = contextUsage?.percent ?? null;
-      const contextTokens = contextUsage?.tokens ?? null;
-      const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
-
-      const statusText = formatStatus(
-        ctx,
-        branch,
-        fileStats,
-        sessionStats,
-        contextPercent,
-        contextTokens,
-        contextWindow,
-        isCompacting,
-      );
-
-      ctx.ui.setStatus(STATUS_KEY, statusText);
-    } catch {
-      // Silently ignore errors (e.g., during shutdown)
-    }
-  }
-
-  /**
-   * Debounced refresh to avoid excessive updates
-   */
   function debouncedRefresh(ctx: ExtensionContext) {
     if (refreshTimer) clearTimeout(refreshTimer);
     refreshTimer = setTimeout(() => {
       refreshTimer = null;
-      void refreshStatus(ctx);
-    }, 500);
+      refreshState(ctx, pi);
+    }, 300);
+  }
+
+  function setupFooter(ctx: ExtensionContext) {
+    refreshState(ctx, pi);
+    (ctx.ui as any).setFooter(
+      (_tui: unknown, theme: Theme, footerData: ReadonlyFooterDataProvider) => {
+        currentTheme = theme;
+        currentFooterData = footerData;
+        return createFooterComponent();
+      },
+    );
   }
 
   /**
-   * Session start or switch
+   * Restore the built-in footer on shutdown
    */
+  function restoreFooter(ctx: ExtensionContext) {
+    (ctx.ui as any).setFooter(undefined);
+    currentTheme = null;
+    currentFooterData = null;
+  }
+
   pi.on("session_start", async (_event: any, ctx: ExtensionContext) => {
-    initialSet = false;
-    await refreshStatus(ctx);
+    refreshState(ctx, pi);
+    setupFooter(ctx);
   });
 
-  /**
-   * Agent finished a turn -- files and context may have changed
-   */
   pi.on("agent_end", async (_event: any, ctx: ExtensionContext) => {
     debouncedRefresh(ctx);
   });
 
-  /**
-   * Session compaction -- context % changes
-   */
   pi.on("session_compact", async (_event: any, ctx: ExtensionContext) => {
-    isCompacting = true;
-    await refreshStatus(ctx);
+    state.isCompacting = true;
+    refreshState(ctx, pi);
     setTimeout(() => {
-      isCompacting = false;
-      void refreshStatus(ctx);
+      state.isCompacting = false;
+      refreshState(ctx, pi);
     }, 3000);
   });
 
-  /**
-   * Tool results -- refresh when file-modifying tools run
-   */
   pi.on("tool_result", async (event: any, ctx: ExtensionContext) => {
-    const toolName = event.toolName;
-    if (toolName === "edit" || toolName === "write_file" || toolName === "bash") {
+    const tn = event.toolName;
+    if (tn === "edit" || tn === "write_file" || tn === "bash") {
       debouncedRefresh(ctx);
     }
   });
 
-  /**
-   * Initial status set when agent starts
-   */
+  pi.on("model_select", async (_event: any, ctx: ExtensionContext) => {
+    refreshState(ctx, pi);
+  });
+
+  pi.on("session_shutdown", async (_event: any, ctx: ExtensionContext) => {
+    restoreFooter(ctx);
+  });
+
   pi.on("agent_start", async (_event: any, ctx: ExtensionContext) => {
-    if (!initialSet) {
-      initialSet = true;
-      await refreshStatus(ctx);
+    if (!state.hasData) {
+      refreshState(ctx, pi);
+      setupFooter(ctx);
     }
   });
 }
