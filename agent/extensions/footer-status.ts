@@ -43,6 +43,8 @@ const SHOW_COST = true;
 const SHOW_SESSION_NAME = true;
 const SHOW_TURNS = true;
 const SHOW_EXTENSION_STATUSES = true;
+const SHOW_THINKING_LEVEL = true;
+const SETTINGS_PATH = path.join(process.env.HOME || "", ".pi", "agent", "settings.json");
 
 // ============================================================================
 // Shared state (updated by event handlers, read by footer render)
@@ -70,6 +72,7 @@ interface FooterState {
   sessionName: string | null;
   isCompacting: boolean;
   hasData: boolean;
+  thinkingLevel: string;
 }
 
 const state: FooterState = {
@@ -94,6 +97,7 @@ const state: FooterState = {
   sessionName: null,
   isCompacting: false,
   hasData: false,
+  thinkingLevel: "off",
 };
 
 // Theme reference (set by footer factory, used by component render)
@@ -101,6 +105,20 @@ let currentTheme: Theme | null = null;
 
 // Footer data reference (set by footer factory)
 let currentFooterData: ReadonlyFooterDataProvider | null = null;
+
+// ============================================================================
+// Settings Reader
+// ============================================================================
+
+function getThinkingLevel(): string {
+  try {
+    const raw = fs.readFileSync(SETTINGS_PATH, "utf8");
+    const settings = JSON.parse(raw);
+    return settings.defaultThinkingLevel || "off";
+  } catch {
+    return "off";
+  }
+}
 
 // ============================================================================
 // Git Helpers
@@ -272,6 +290,7 @@ function refreshState(ctx: ExtensionContext) {
   state.modelName = ctx.model?.id || "no-model";
 
   state.sessionName = SHOW_SESSION_NAME ? (ctx.sessionManager.getSessionName() ?? null) : null;
+  state.thinkingLevel = SHOW_THINKING_LEVEL ? getThinkingLevel() : "off";
   state.hasData = true;
 }
 
@@ -327,11 +346,28 @@ function createFooterComponent(): Component {
         segs.push(muted(`ctx:?/${formatTokens(state.contextWindow)}`));
       }
 
-      // 4. Model (provider) name
-      if (state.provider) {
-        segs.push(`${muted(state.provider)} ${accent(state.modelName)}`);
+      // 4. Model + thinking level (original mode display format)
+      if (SHOW_THINKING_LEVEL && state.thinkingLevel !== "off") {
+        const lvl = state.thinkingLevel;
+        const colorMap: Record<string, string> = {
+          low: "thinkingLow",
+          medium: "thinkingMedium",
+          high: "thinkingHigh",
+          xhigh: "thinkingXhigh",
+          minimal: "thinkingMinimal",
+        };
+        const colorName = colorMap[lvl] || "thinkingOff";
+        if (state.provider) {
+          segs.push(`${muted(state.provider)} ${accent(state.modelName)} ${muted("thinking:")}${t.fg(colorName, lvl)}`);
+        } else {
+          segs.push(`${accent(state.modelName)} ${muted("thinking:")}${t.fg(colorName, lvl)}`);
+        }
       } else {
-        segs.push(accent(state.modelName));
+        if (state.provider) {
+          segs.push(`${muted(state.provider)} ${accent(state.modelName)}`);
+        } else {
+          segs.push(accent(state.modelName));
+        }
       }
 
       // 5. Session tokens
@@ -422,12 +458,69 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         return createFooterComponent();
       },
     );
+    
+    // Add keyboard handler for Shift+Tab to cycle thinking levels
+    if ((ctx.ui as any).onInput) {
+      (ctx.ui as any).onInput((key: string) => {
+        // Handle Shift+Tab to cycle through thinking levels
+        if (key === "shift+tab") {
+          cycleThinkingLevel(ctx);
+          return true; // Indicate that we handled the key
+        }
+        return false;
+      });
+    }
+  }
+
+  /**
+   * Cycle through thinking levels: off -> minimal -> low -> medium -> high -> xhigh -> off
+   */
+  function cycleThinkingLevel(ctx: ExtensionContext) {
+    const currentLevel = getThinkingLevel();
+    const levels = ["off", "minimal", "low", "medium", "high", "xhigh"];
+    const currentIndex = levels.indexOf(currentLevel);
+    const nextIndex = (currentIndex + 1) % levels.length;
+    const newLevel = levels[nextIndex];
+    
+    // Update the settings file
+    try {
+      // Create directory if it doesn't exist
+      const dir = path.dirname(SETTINGS_PATH);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      
+      let settings = {};
+      if (fs.existsSync(SETTINGS_PATH)) {
+        const raw = fs.readFileSync(SETTINGS_PATH, "utf8");
+        settings = JSON.parse(raw);
+      }
+      
+      settings.defaultThinkingLevel = newLevel;
+      fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+      
+      // Update the state and refresh the display
+      state.thinkingLevel = newLevel;
+      if ((ctx.ui as any).refreshFooter) {
+        (ctx.ui as any).refreshFooter();
+      } else {
+        // Fallback to triggering a refresh event
+        setTimeout(() => {
+          refreshState(ctx);
+        }, 50);
+      }
+    } catch (error) {
+      console.error("Failed to update thinking level:", error);
+    }
   }
 
   /**
    * Restore the built-in footer on shutdown
    */
   function restoreFooter(ctx: ExtensionContext) {
+    if ((ctx.ui as any).onInput) {
+      (ctx.ui as any).onInput(null); // Remove the input handler
+    }
     (ctx.ui as any).setFooter(undefined);
     currentTheme = null;
     currentFooterData = null;
