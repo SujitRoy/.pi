@@ -10,15 +10,20 @@ PI's OpenAI provider sends default `X-Stainless-*` headers that AgentRouter does
 
 ## How to Run
 
+### Linux / macOS (Bash)
+```bash
+bash ~/.pi/scripts/patch-agentrouter.sh
+```
+
 ### Windows (PowerShell)
 ```powershell
 powershell -ExecutionPolicy Bypass -File patch-agentrouter.ps1
 ```
 
-### Linux / macOS (Bash)
+### From the scripts directory
 ```bash
-chmod +x patch-agentrouter.sh
-./patch-agentrouter.sh
+cd ~/.pi/scripts
+bash patch-agentrouter.sh
 ```
 
 ## What It Does
