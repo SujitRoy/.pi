@@ -18,6 +18,7 @@
  */
 
 import { Type } from '@sinclair/typebox';
+import { parse } from 'node-html-parser';
 
 // Configuration
 const DEFAULT_SEARXNG_URL = "http://140.238.166.109:8081";
@@ -329,22 +330,31 @@ async function fetchUrlContent(url: string, maxLength = 2000, prompt?: string) {
         
         const html = await response.text();
         
-        // Simple HTML parsing (in production, use a proper HTML parser)
-        const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-        const title = titleMatch ? titleMatch[1].trim() : 'No title';
+        // Parse HTML with proper parser
+        const root = parse(html);
         
-        // Extract text content (simplified)
-        const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
-        let text = bodyMatch ? bodyMatch[1] : html;
+        // Extract title
+        const titleElement = root.querySelector('title');
+        const title = titleElement ? titleElement.text.trim() : 'No title';
         
-        // Remove scripts, styles, comments
-        text = text.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<!--[\s\S]*?-->/gi, '');
+        // Extract main content
+        const bodyElement = root.querySelector('body');
+        let text = '';
         
-        // Remove HTML tags
-        text = text.replace(/<[^>]+>/g, ' ');
-        
-        // Clean up whitespace
-        text = text.replace(/\s+/g, ' ').trim();
+        if (bodyElement) {
+            // Remove script and style elements
+            bodyElement.querySelectorAll('script, style, noscript, iframe').forEach(el => el.remove());
+            
+            // Get structured text (preserves paragraph structure)
+            text = bodyElement.structuredText;
+            
+            // Clean up excessive whitespace
+            text = text.replace(/\s+/g, ' ').trim();
+        } else {
+            // Fallback: extract text from entire document
+            root.querySelectorAll('script, style, noscript, iframe').forEach(el => el.remove());
+            text = root.structuredText.replace(/\s+/g, ' ').trim();
+        }
         
         // Truncate if needed
         if (text.length > maxLength) {

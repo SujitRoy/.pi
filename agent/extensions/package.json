@@ -13,6 +13,7 @@
   },
   "type": "commonjs",
   "dependencies": {
-    "@sinclair/typebox": "^0.34.49"
+    "@sinclair/typebox": "^0.34.49",
+    "node-html-parser": "^7.1.0"
   }
 }
