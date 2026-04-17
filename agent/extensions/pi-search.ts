@@ -28,6 +28,7 @@ const SEARXNG_BASE = (typeof process !== 'undefined' && process.env && process.e
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const RATE_LIMIT_REQUESTS = 5;
 const RATE_LIMIT_WINDOW_MS = 10000; // 10 seconds
+const CACHE_MAX_ITEMS = 100;
 
 // Sanitization configuration
 enum SanitizationLevel {
@@ -40,18 +41,109 @@ enum SanitizationLevel {
 const DEFAULT_SANITIZATION_LEVEL = SanitizationLevel.MODERATE;
 const SANITIZATION_LEVEL = (typeof process !== 'undefined' && process.env && process.env.SANITIZATION_LEVEL) || DEFAULT_SANITIZATION_LEVEL;
 
-// Cache
-const searchCache = new Map();
-
-// Clean cache periodically
-setInterval(() => {
-    const now = Date.now();
-    for (const [key, entry] of searchCache.entries()) {
-        if (now - entry.timestamp > CACHE_TTL) {
-            searchCache.delete(key);
+// Simple LRU cache implementation
+class SimpleLRUCache<K, V> {
+    private cache = new Map<K, { value: V; timestamp: number; accessTime: number }>();
+    private maxSize: number;
+    private ttl: number;
+    
+    constructor(maxSize: number, ttl: number) {
+        this.maxSize = maxSize;
+        this.ttl = ttl;
+        // Auto-cleanup every minute
+        setInterval(() => this.cleanup(), 60000);
+    }
+    
+    get(key: K): V | undefined {
+        const entry = this.cache.get(key);
+        if (!entry) return undefined;
+        
+        // Check if expired
+        if (Date.now() - entry.timestamp > this.ttl) {
+            this.cache.delete(key);
+            return undefined;
+        }
+        
+        // Update access time for LRU
+        entry.accessTime = Date.now();
+        return entry.value;
+    }
+    
+    set(key: K, value: V): void {
+        const now = Date.now();
+        this.cache.set(key, { 
+            value, 
+            timestamp: now,
+            accessTime: now 
+        });
+        
+        // Enforce max size
+        if (this.cache.size > this.maxSize) {
+            // Find least recently used key
+            let lruKey: K | null = null;
+            let oldestAccess = Infinity;
+            
+            for (const [k, entry] of this.cache.entries()) {
+                if (entry.accessTime < oldestAccess) {
+                    oldestAccess = entry.accessTime;
+                    lruKey = k;
+                }
+            }
+            
+            if (lruKey) {
+                this.cache.delete(lruKey);
+            }
         }
     }
-}, 60000); // Clean every minute
+    
+    has(key: K): boolean {
+        return this.get(key) !== undefined;
+    }
+    
+    delete(key: K): boolean {
+        return this.cache.delete(key);
+    }
+    
+    get size(): number {
+        return this.cache.size;
+    }
+    
+    private cleanup(): void {
+        const now = Date.now();
+        for (const [key, entry] of this.cache.entries()) {
+            if (now - entry.timestamp > this.ttl) {
+                this.cache.delete(key);
+            }
+        }
+    }
+    
+    // Get cache statistics
+    getStats() {
+        const now = Date.now();
+        let oldestTimestamp = Infinity;
+        let oldestAccess = Infinity;
+        
+        for (const entry of this.cache.values()) {
+            if (entry.timestamp < oldestTimestamp) {
+                oldestTimestamp = entry.timestamp;
+            }
+            if (entry.accessTime < oldestAccess) {
+                oldestAccess = entry.accessTime;
+            }
+        }
+        
+        return {
+            size: this.cache.size,
+            maxSize: this.maxSize,
+            ttl: this.ttl,
+            oldestEntryAge: oldestTimestamp === Infinity ? 'N/A' : Math.floor((now - oldestTimestamp) / 1000) + 's',
+            oldestAccessAge: oldestAccess === Infinity ? 'N/A' : Math.floor((now - oldestAccess) / 1000) + 's'
+        };
+    }
+}
+
+// Create LRU cache instance
+const searchCache = new SimpleLRUCache<string, any>(CACHE_MAX_ITEMS, CACHE_TTL);
 
 // Rate limiting with token bucket algorithm
 class TokenBucketRateLimiter {
@@ -582,9 +674,9 @@ async function unifiedSearch(params: {
     // Check cache
     const cacheKey = `${query}:${mode}:${maxResults}:${depth}:${safeMode}`;
     const cached = searchCache.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    if (cached) {
         return {
-            ...cached.data,
+            ...cached,
             cached: true,
             processing_time_ms: Date.now() - startTime
         };
@@ -656,16 +748,7 @@ async function unifiedSearch(params: {
         };
         
         // Cache the result
-        searchCache.set(cacheKey, {
-            data: result,
-            timestamp: Date.now()
-        });
-        
-        // Limit cache size
-        if (searchCache.size > 100) {
-            const firstKey = searchCache.keys().next().value;
-            searchCache.delete(firstKey);
-        }
+        searchCache.set(cacheKey, result);
         
         return result;
     } catch (error) {
@@ -682,12 +765,9 @@ async function unifiedSearch(params: {
 // Health check function
 function searchHealth() {
     const now = Date.now();
-    const cacheStats = {
-        size: searchCache.size,
-        oldest: searchCache.size > 0 ? 
-            Math.floor((now - Math.min(...Array.from(searchCache.values()).map(e => e.timestamp))) / 1000) + ' seconds ago' :
-            'N/A'
-    };
+    
+    // Get cache statistics
+    const cacheStats = searchCache.getStats();
     
     const rateLimiterStats = rateLimiter.getStats();
     const globalRemaining = rateLimiter.getRemainingTokens('global');

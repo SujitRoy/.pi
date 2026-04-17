@@ -14,6 +14,7 @@
   "type": "commonjs",
   "dependencies": {
     "@sinclair/typebox": "^0.34.49",
+    "lru-cache": "^11.3.5",
     "node-html-parser": "^7.1.0"
   }
 }
