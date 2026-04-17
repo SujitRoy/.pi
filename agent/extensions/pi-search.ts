@@ -29,6 +29,17 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const RATE_LIMIT_REQUESTS = 5;
 const RATE_LIMIT_WINDOW_MS = 10000; // 10 seconds
 
+// Sanitization configuration
+enum SanitizationLevel {
+    NONE = 'none',           // No sanitization (for trusted environments)
+    MINIMAL = 'minimal',     // Block only clearly malicious intent
+    MODERATE = 'moderate',   // Block obvious inappropriate content (default)
+    STRICT = 'strict'        // Aggressive sanitization (compliance mode)
+}
+
+const DEFAULT_SANITIZATION_LEVEL = SanitizationLevel.MODERATE;
+const SANITIZATION_LEVEL = (typeof process !== 'undefined' && process.env && process.env.SANITIZATION_LEVEL) || DEFAULT_SANITIZATION_LEVEL;
+
 // Cache
 const searchCache = new Map();
 
@@ -140,45 +151,131 @@ function checkRateLimit(): boolean {
     return rateLimiter.isAllowed('global');
 }
 
-// Query sanitization to avoid 500 errors
-function sanitizeQuery(query: string): string {
-    const replacements: Record<string, string> = {
-        // Security terms
-        'hack': 'security',
-        'crack': 'access',
-        'exploit': 'vulnerability',
-        'bypass': 'workaround',
-        'ddos': 'network issue',
-        'malware': 'security software',
-        'virus': 'computer issue',
+// Enhanced query sanitization with configurable levels
+function sanitizeQuery(query: string, level: SanitizationLevel = SANITIZATION_LEVEL as SanitizationLevel): string {
+    // Early return for NONE level
+    if (level === SanitizationLevel.NONE) {
+        return query;
+    }
+    
+    // Define sanitization rules by level
+    interface BlockRules {
+        blockPatterns: RegExp[];
+        replacement: string;
+    }
+    
+    interface ReplacementRules {
+        replacements: Record<string, string>;
+    }
+    
+    type SanitizationRules = BlockRules | ReplacementRules;
+    
+    const rules: Record<SanitizationLevel, SanitizationRules> = {
+        [SanitizationLevel.NONE]: { blockPatterns: [], replacement: '' },
         
-        // Violence terms
-        'kill': 'stop',
-        'murder': 'crime',
-        'weapon': 'tool',
-        'attack': 'action',
-        'terror': 'fear',
+        [SanitizationLevel.MINIMAL]: {
+            blockPatterns: [
+                /\b(child\s*?porn|cp|kiddie\s*?porn)\b/gi,
+                /\b(rape|incest|bestiality)\b/gi,
+                /\b(bomb\s*?making|build\s*?bomb)\b/gi,
+                /\b(how\s+to\s+kill\s+someone)\b/gi
+            ],
+            replacement: '[content removed]'
+        },
         
-        // Adult content
-        'porn': 'content',
-        'xxx': 'adult material',
-        'adult': 'mature',
-        'nsfw': 'content',
+        [SanitizationLevel.MODERATE]: {
+            blockPatterns: [
+                /\b(child\s*?porn|cp|kiddie\s*?porn|rape|incest|bestiality)\b/gi,
+                /\b(bomb\s*?making|build\s*?bomb|how\s+to\s+kill\s+someone)\b/gi,
+                /\b(hardcore\s*?porn|extreme\s*?porn)\b/gi,
+                /\b(drugs\s+for\s+sale|buy\s+drugs)\b/gi
+            ],
+            replacement: '[content removed]'
+        },
         
-        // Political/sensitive
-        'controversial': 'debated',
-        'political': 'governmental',
-        'protest': 'demonstration',
-        'riot': 'protest'
+        [SanitizationLevel.STRICT]: {
+            replacements: {
+                // Security terms
+                'hack': 'security',
+                'crack': 'access',
+                'exploit': 'vulnerability',
+                'bypass': 'workaround',
+                'ddos': 'network issue',
+                'malware': 'security software',
+                'virus': 'computer issue',
+                
+                // Violence terms
+                'kill': 'stop',
+                'murder': 'crime',
+                'weapon': 'tool',
+                'attack': 'action',
+                'terror': 'fear',
+                
+                // Adult content
+                'porn': 'content',
+                'xxx': 'adult material',
+                'adult': 'mature',
+                'nsfw': 'content',
+                
+                // Political/sensitive
+                'controversial': 'debated',
+                'political': 'governmental',
+                'protest': 'demonstration',
+                'riot': 'protest'
+            }
+        }
     };
     
-    let sanitized = query.toLowerCase();
-    for (const [bad, good] of Object.entries(replacements)) {
-        const regex = new RegExp(`\\b${bad}\\b`, 'gi');
-        sanitized = sanitized.replace(regex, good);
+    const levelRules = rules[level];
+    let sanitized = query;
+    
+    if ('replacements' in levelRules) {
+        // Apply word replacements (STRICT level)
+        for (const [bad, good] of Object.entries(levelRules.replacements)) {
+            const regex = new RegExp(`\\b${bad}\\b`, 'gi');
+            sanitized = sanitized.replace(regex, good);
+        }
+    } else {
+        // Apply block patterns (MINIMAL and MODERATE levels)
+        for (const pattern of levelRules.blockPatterns) {
+            sanitized = sanitized.replace(pattern, levelRules.replacement);
+        }
     }
     
     return sanitized;
+}
+
+// Check if query should be blocked entirely
+function shouldBlockQuery(query: string, level: SanitizationLevel = SANITIZATION_LEVEL as SanitizationLevel): boolean {
+    if (level === SanitizationLevel.NONE) {
+        return false;
+    }
+    
+    // Severe violations that should always be blocked
+    const severePatterns = [
+        /\b(child\s*?porn|cp|kiddie\s*?porn)\b/gi,
+        /\b(rape\s*?porn|incest\s*?porn)\b/gi,
+        /\b(make\s+bomb|build\s+bomb|bomb\s+making)\b/gi
+    ];
+    
+    for (const pattern of severePatterns) {
+        if (pattern.test(query)) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+// Get description of sanitization level
+function getSanitizationDescription(level: SanitizationLevel): string {
+    const descriptions = {
+        [SanitizationLevel.NONE]: 'No sanitization - queries passed through as-is',
+        [SanitizationLevel.MINIMAL]: 'Minimal - only blocks clearly malicious intent',
+        [SanitizationLevel.MODERATE]: 'Moderate - blocks obvious inappropriate content (default)',
+        [SanitizationLevel.STRICT]: 'Strict - aggressive sanitization for compliance'
+    };
+    return descriptions[level] || 'Unknown level';
 }
 
 // Query classification
@@ -493,8 +590,19 @@ async function unifiedSearch(params: {
         };
     }
     
+    // Check if query should be blocked entirely (severe violations)
+    if (safeMode && shouldBlockQuery(query)) {
+        return {
+            success: false,
+            query,
+            error: 'Query contains prohibited content and cannot be processed.',
+            processing_time_ms: Date.now() - startTime
+        };
+    }
+    
     // Sanitize query if safe mode is enabled
-    const searchQuery = safeMode ? sanitizeQuery(query) : query;
+    const sanitizationLevel = safeMode ? (SANITIZATION_LEVEL as SanitizationLevel) : SanitizationLevel.NONE;
+    const searchQuery = safeMode ? sanitizeQuery(query, sanitizationLevel) : query;
     
     // Determine search mode
     let effectiveMode = mode;
@@ -589,6 +697,10 @@ function searchHealth() {
         status: 'healthy',
         searxng_url: SEARXNG_BASE,
         cache: cacheStats,
+        sanitization: {
+            level: SANITIZATION_LEVEL,
+            description: getSanitizationDescription(SANITIZATION_LEVEL as SanitizationLevel)
+        },
         rate_limiting: {
             ...rateLimiterStats,
             global_remaining_tokens: globalRemaining,
