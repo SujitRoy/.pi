@@ -8,6 +8,7 @@ test-*.js
 test-*.ts
 test-*.md
 comparison-report.md
+TODO-*.md
 
 # Backup directories
 backup/
