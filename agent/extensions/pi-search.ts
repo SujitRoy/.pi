@@ -17,6 +17,8 @@
  * - fetch_content: URL content extraction
  */
 
+import { Type } from '@sinclair/typebox';
+
 // Configuration
 const DEFAULT_SEARXNG_URL = "http://140.238.166.109:8081";
 // Use global process if available, otherwise default
@@ -438,63 +440,110 @@ export default async function (pi: any): Promise<void> {
     // Register search tool
     pi.registerTool({
         name: 'search',
+        label: 'Web Search',
         description: 'Intelligent web search with AI enhancement',
-        parameters: {
-            query: { type: 'string', description: 'Search query' },
-            mode: { 
-                type: 'string', 
+        parameters: Type.Object({
+            query: Type.String({ description: 'Search query' }),
+            mode: Type.Optional(Type.String({ 
                 description: 'Search mode: auto, traditional, ai, research',
                 enum: ['auto', 'traditional', 'ai', 'research'],
                 default: 'auto'
-            },
-            maxResults: { 
-                type: 'number', 
+            })),
+            maxResults: Type.Optional(Type.Number({ 
                 description: 'Maximum number of results (1-20)',
                 minimum: 1,
                 maximum: 20,
                 default: 10
-            },
-            depth: { 
-                type: 'string', 
+            })),
+            depth: Type.Optional(Type.String({ 
                 description: 'Search depth: fast, standard, deep',
                 enum: ['fast', 'standard', 'deep'],
                 default: 'standard'
-            },
-            safeMode: { 
-                type: 'boolean', 
+            })),
+            safeMode: Type.Optional(Type.Boolean({ 
                 description: 'Enable safe mode to filter sensitive content',
                 default: true
+            }))
+        }),
+        execute: async (toolCallId: string, params: any, signal: any, onUpdate: any, ctx: any) => {
+            const result = await unifiedSearch(params, ctx);
+            
+            // Format the response for PI
+            let text = '';
+            if (!result.success) {
+                text = `**Search Error**\n\n${result.error || 'Unknown error'}`;
+            } else {
+                text = `## Search Results\n\n`;
+                text += `**Query:** ${result.query}\n`;
+                text += `**Mode:** ${result.mode_used}\n`;
+                text += `**Results:** ${result.results_count}\n`;
+                text += `**Processing Time:** ${result.processing_time_ms}ms\n`;
+                
+                if (result.cached) {
+                    text += `**Note:** Served from cache\n`;
+                }
+                
+                if (result.ai_answer) {
+                    text += `\n---\n\n### AI Answer\n\n${result.ai_answer}\n`;
+                }
+                
+                if (result.results && result.results.length > 0) {
+                    text += `\n---\n\n### Top Results\n\n`;
+                    result.results.slice(0, 3).forEach((r: any, i: number) => {
+                        text += `${i + 1}. **${r.title}**\n`;
+                        text += `   ${r.snippet.substring(0, 100)}...\n`;
+                        text += `   ${r.url}\n\n`;
+                    });
+                }
             }
-        },
-        handler: unifiedSearch
+            
+            return {
+                content: [{ type: 'text', text }],
+                details: result,
+                isError: !result.success
+            };
+        }
     });
     
     // Register health check tool
     pi.registerTool({
         name: 'search_health',
+        label: 'Search Health',
         description: 'Check search system health and statistics',
-        parameters: {},
-        handler: searchHealth
+        parameters: Type.Object({}),
+        execute: async (toolCallId: string, params: any, signal: any, onUpdate: any, ctx: any) => {
+            const health = searchHealth();
+            let text = `## Search System Health\n\n`;
+            text += `**Status:** ${health.status}\n`;
+            text += `**SearXNG URL:** ${health.searxng_url}\n`;
+            text += `**Cache Size:** ${health.cache.size} entries\n`;
+            text += `**Rate Limit Recent Requests:** ${health.rate_limiting.recent_requests}\n`;
+            text += `**Timestamp:** ${health.timestamp}\n`;
+            
+            return {
+                content: [{ type: 'text', text }],
+                details: health,
+                isError: false
+            };
+        }
     });
     
     // Register content fetch tool
     pi.registerTool({
         name: 'fetch_content',
+        label: 'Fetch Content',
         description: 'Fetch and extract content from a URL',
-        parameters: {
-            url: { type: 'string', description: 'URL to fetch' },
-            maxLength: { 
-                type: 'number', 
+        parameters: Type.Object({
+            url: Type.String({ description: 'URL to fetch' }),
+            maxLength: Type.Optional(Type.Number({ 
                 description: 'Maximum content length in characters',
                 default: 2000
-            },
-            prompt: { 
-                type: 'string', 
-                description: 'Optional prompt to focus extraction',
-                optional: true
-            }
-        },
-        handler: async (params: any, piContext: any) => {
+            })),
+            prompt: Type.Optional(Type.String({ 
+                description: 'Optional prompt to focus extraction'
+            }))
+        }),
+        execute: async (toolCallId: string, params: any, signal: any, onUpdate: any, ctx: any) => {
             try {
                 // Handle maxLength parameter safely
                 let maxLengthValue = 2000;
@@ -517,16 +566,28 @@ export default async function (pi: any): Promise<void> {
                     params.prompt
                 );
                 
+                let text = `## Content Fetched\n\n`;
+                text += `**Title:** ${content.title}\n`;
+                text += `**URL:** ${content.url}\n`;
+                text += `**Length:** ${content.length} characters\n`;
+                text += `**Fetched At:** ${content.fetchedAt}\n\n`;
+                text += `### Content Preview\n\n${content.content.substring(0, 500)}${content.content.length > 500 ? '...' : ''}`;
+                
                 return {
-                    success: true,
-                    content,
-                    processing_time_ms: Date.now() - (piContext?.startTime || Date.now())
+                    content: [{ type: 'text', text }],
+                    details: { success: true, content },
+                    isError: false
                 };
             } catch (error) {
+                let text = `**Fetch Content Error**\n\nFailed to fetch content: ${error instanceof Error ? error.message : 'Unknown error'}`;
+                
                 return {
-                    success: false,
-                    error: `Failed to fetch content: ${error instanceof Error ? error.message : 'Unknown error'}`,
-                    processing_time_ms: Date.now() - (piContext?.startTime || Date.now())
+                    content: [{ type: 'text', text }],
+                    details: { 
+                        success: false, 
+                        error: error instanceof Error ? error.message : 'Unknown error' 
+                    },
+                    isError: true
                 };
             }
         }
