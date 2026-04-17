@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 /**
  * PI Agent Extension: Web Search
  *
@@ -28,7 +30,6 @@
  * - Defaults to http://localhost:8080 if not set
  */
 
-import { StringEnum } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { existsSync, readFileSync } from "node:fs";
@@ -1731,13 +1732,13 @@ function extractStructuredData(
 // ============================================================================
 
 export default function (pi: ExtensionAPI) {
-
-
-  // Register the web_search tool
-  // Define enum types for parameters
-  const CategoryEnum = StringEnum(["general", "news", "it", "science"] as const);
-  const DepthEnum = StringEnum(["fast", "standard", "deep"] as const);
-  const SearchTypeEnum = StringEnum(["web", "news", "images", "videos"] as const);
+  console.log('[web-search] Extension loading...');
+  
+  try {
+    console.log(`[web-search] SEARXNG_BASE_URL: ${process.env.SEARXNG_BASE_URL || 'not set, using default'}`);
+    console.log(`[web-search] Using base URL: ${SEARXNG_BASE}`);
+    
+    // Register the web_search tool
   
   pi.registerTool({
     name: "web_search",
@@ -2052,4 +2053,11 @@ export default function (pi: ExtensionAPI) {
       }
     },
   });
+    
+    console.log('[web-search] All tools registered successfully');
+  } catch (error) {
+    console.error('[web-search] Extension initialization failed:', error);
+    throw error; // Re-throw so PI Agent knows extension failed to load
+  }
 }
+

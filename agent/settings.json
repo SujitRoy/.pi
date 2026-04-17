@@ -3,6 +3,11 @@
   "defaultProvider": "agentrouter",
   "defaultModel": "deepseek-v3.2",
   "defaultThinkingLevel": "medium",
-  "theme": "carbon",
-  "enabledModels": []
+  "theme": "tokyo-night",
+  "enabledModels": [],
+  "packages": [
+    "extensions\\web-search.ts",
+    "extensions\\planning.js",
+    "npm:pi-gsd"
+  ]
 }
