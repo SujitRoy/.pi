@@ -227,11 +227,86 @@ async function generateAIAnswer(query: string, results: any[], piContext: any) {
 }
 
 // Fetch URL content
+// Validate URL is safe for fetching (SSRF protection)
+function isUrlSafeForFetching(url: string): boolean {
+    try {
+        const parsed = new URL(url);
+        
+        // Protocol validation
+        if (!['http:', 'https:'].includes(parsed.protocol)) {
+            return false;
+        }
+        
+        // Extract hostname/IP
+        const hostname = parsed.hostname.toLowerCase();
+        
+        // Block localhost and loopback addresses
+        if (hostname === 'localhost' || hostname === 'localhost.localdomain') {
+            return false;
+        }
+        
+        // Block IPv4 loopback
+        if (hostname === '127.0.0.1' || hostname === '127.0.0.0') {
+            return false;
+        }
+        
+        // Block IPv6 loopback (compressed and uncompressed)
+        if (hostname === '::1' || hostname === '0:0:0:0:0:0:0:1' || hostname === '[::1]') {
+            return false;
+        }
+        
+        // Block IPv4 private ranges
+        const ipParts = hostname.split('.').map(Number);
+        if (ipParts.length === 4 && !ipParts.some(isNaN)) {
+            // 10.0.0.0/8
+            if (ipParts[0] === 10) {
+                return false;
+            }
+            // 172.16.0.0/12
+            if (ipParts[0] === 172 && ipParts[1] >= 16 && ipParts[1] <= 31) {
+                return false;
+            }
+            // 192.168.0.0/16
+            if (ipParts[0] === 192 && ipParts[1] === 168) {
+                return false;
+            }
+            // 169.254.0.0/16 (link-local)
+            if (ipParts[0] === 169 && ipParts[1] === 254) {
+                return false;
+            }
+        }
+        
+        // Block common cloud metadata endpoints
+        const blockedPatterns = [
+            /^metadata\.google\.internal$/i,
+            /^169\.254\.169\.254$/,
+            /^metadata$/i,
+            /^instance-data$/i
+        ];
+        
+        for (const pattern of blockedPatterns) {
+            if (pattern.test(hostname)) {
+                return false;
+            }
+        }
+        
+        // Block .local and .internal domains
+        if (hostname.endsWith('.local') || hostname.endsWith('.internal')) {
+            return false;
+        }
+        
+        return true;
+    } catch (error) {
+        // Invalid URL format
+        return false;
+    }
+}
+
 async function fetchUrlContent(url: string, maxLength = 2000, prompt?: string) {
     try {
-        // Basic URL validation
-        if (!url.startsWith('http://') && !url.startsWith('https://')) {
-            throw new Error('Invalid URL protocol');
+        // Comprehensive URL validation for SSRF protection
+        if (!isUrlSafeForFetching(url)) {
+            throw new Error('URL is not safe for fetching. Blocked to prevent SSRF attacks.');
         }
         
         // Use AbortController for timeout
