@@ -6,6 +6,7 @@ settings.json
 # Test files
 test-*.js
 test-*.ts
+test-*.md
 comparison-report.md
 
 # Backup directories

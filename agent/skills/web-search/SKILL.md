@@ -1,11 +1,11 @@
 ---
 name: web-search
-description: Live web search using SearXNG API and URL content fetching for real-time information
+description: Live web search using unified pi-search extension with intelligent three-tier architecture
 ---
 
 ## When to Use Web Search
 
-Use `web_search` tool when:
+Use `search` tool (from pi-search.ts) when:
 - Query requires current, real-time information (news, weather, stock prices, live scores)
 - User asks about events that happened recently or are ongoing
 - User provides a URL and wants content extracted (use `fetch_content`)
@@ -18,10 +18,10 @@ Do NOT use web_search when:
 - The query is vague or ambiguous — ask for clarification first
 
 **Examples of when to search:**
-- "What's the weather in Tokyo?" → use `web_search`
-- "Who won the last Super Bowl?" → use `web_search`
-- "Latest Node.js security vulnerabilities" → use `web_search`
-- "Current price of Bitcoin" → use `web_search`
+- "What's the weather in Tokyo?" → use `search` (mode: auto)
+- "Who won the last Super Bowl?" → use `search` (mode: traditional)
+- "Latest Node.js security vulnerabilities" → use `search` (mode: research)
+- "Current price of Bitcoin" → use `search` (mode: auto)
 
 **Examples of when NOT to search:**
 - "How do I write a for loop in Python?" → answer from knowledge
@@ -31,21 +31,20 @@ Do NOT use web_search when:
 
 ## Available Tools
 
-### 1. `web_search` - Search the Web
-- Use ONLY for current, real-time information from the web.
-- Search using the SearXNG API endpoint.
-- Parse and return relevant search results with title, content, URL, and published date.
-- Categories: general, news, science, it, technology.
-- Languages: en (English) by default, can be overridden.
-- Format: json for structured parsing.
-- Limit results to top 5-10 most relevant items.
-- Always cite sources with URLs.
-- For time-sensitive queries, prioritize recent results.
+### 1. `search` - Unified Intelligent Search
+- Use for current, real-time information from the web.
+- Auto-detects query type: simple/factual → traditional search, complex → AI enhancement
+- Intelligent three-tier fallback: Native LLM → Simulated AI → Traditional search
+- Parameters: query, mode (auto/traditional/ai/research), maxResults (1-20), depth (fast/standard/deep), safeMode (true/false)
+- Query sanitization: Avoids 500 errors by replacing sensitive terms
+- Rate limiting: 5 requests per 10 seconds with queueing
+- Caching: 5-minute TTL with automatic cleanup
 
-**Depth Modes:**
-- `fast`: Quick search, no content fetching
-- `standard`: Balanced approach with basic formatting
-- `deep`: Fetches and extracts content from top 3 source pages
+**Modes:**
+- `auto`: Intelligent classification (default)
+- `traditional`: Traditional SearXNG search only
+- `ai`: Force AI enhancement if available
+- `research`: Deep research with maximum AI integration
 
 ### 2. `fetch_content` - Fetch Content from URL
 - Use this skill when you need to read content from a specific URL.
@@ -59,8 +58,9 @@ Do NOT use web_search when:
 **Security Features:**
 - SSRF protection: Blocks access to internal/private network URLs
 - Content-Type validation: Only processes text-based content
-- Automatic redirect following (up to 5 hops)
-- Intelligent caching for repeated requests (5-min TTL)
+- Query sanitization: Replaces sensitive terms to avoid 500 errors
+- Safe mode: Filters adult/pornographic content by default
+- Rate limiting: Prevents abuse with 5 requests per 10 seconds
 
 **Use cases:**
 - Reading articles, blog posts, documentation
@@ -81,10 +81,11 @@ curl -X POST "$SEARXNG_BASE_URL/search" \
 ## Usage
 
 When searching, use the following parameters:
-- `q` - The search query
-- `format` - json (for structured parsing)
-- `categories` - news, general, it, science (default: general)
-- `language` - en (default)
+- `query` - The search query (required)
+- `mode` - auto/traditional/ai/research (default: auto)
+- `maxResults` - 1-20 (default: 10)
+- `depth` - fast/standard/deep (default: standard)
+- `safeMode` - true/false (default: true, avoids adult content)
 
 ## Response Format
 
@@ -97,10 +98,12 @@ Parse the JSON response and extract:
 ## Example
 
 For query "who won t20 wc 2026":
-1. Search with category=news for recent events
-2. Parse results array
-3. Return top results with title, content, URL, and date
-4. Format as a concise answer with source links
+1. Use `search({query: "who won t20 wc 2026", mode: "auto"})`
+2. System auto-classifies as factual/time-sensitive → uses traditional search
+3. Returns structured JSON with results and optional AI answer
+4. Format as concise answer with source links and timestamps
+
+**Note:** `fetch_content` tool is still available as part of the unified search extension.
 
 For fetching content from a URL:
 1. Use `fetch_content({ url: "https://..." })` 

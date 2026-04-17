@@ -26,6 +26,12 @@ dist/
 # Cache directories
 cache/
 
+# Planning/scratch documents (not production code)
+ai-enhanced-web-search.md
+hybrid-web-search-plan.md
+GIT_TOOLS_IMPROVEMENTS.md
+GIT_TOOLS_REVIEW.md
+
 # OS files
 .DS_Store
 Thumbs.db
