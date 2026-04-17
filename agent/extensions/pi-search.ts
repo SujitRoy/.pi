@@ -238,6 +238,44 @@ class TokenBucketRateLimiter {
 // Create rate limiter instance
 const rateLimiter = new TokenBucketRateLimiter();
 
+// Structured error codes
+enum SearchErrorCode {
+    RATE_LIMIT_EXCEEDED = 'RATE_LIMIT_EXCEEDED',
+    QUERY_BLOCKED = 'QUERY_BLOCKED',
+    NO_RESULTS = 'NO_RESULTS',
+    SEARCH_FAILED = 'SEARCH_FAILED',
+    NETWORK_ERROR = 'NETWORK_ERROR',
+    SSRF_BLOCKED = 'SSRF_BLOCKED',
+    INVALID_URL = 'INVALID_URL',
+    PARSING_ERROR = 'PARSING_ERROR',
+    AI_GENERATION_FAILED = 'AI_GENERATION_FAILED',
+    UNKNOWN_ERROR = 'UNKNOWN_ERROR'
+}
+
+interface SearchError {
+    code: SearchErrorCode;
+    message: string;
+    details?: any;
+    retryable: boolean;
+    timestamp: string;
+}
+
+// Create structured errors
+function createError(
+    code: SearchErrorCode, 
+    message: string, 
+    details?: any, 
+    retryable = false
+): SearchError {
+    return {
+        code,
+        message,
+        details,
+        retryable,
+        timestamp: new Date().toISOString()
+    };
+}
+
 // Rate limiting check (maintains backward compatibility)
 function checkRateLimit(): boolean {
     return rateLimiter.isAllowed('global');
@@ -437,7 +475,12 @@ async function performSearxngSearch(query: string, category = 'general', maxResu
         clearTimeout(timeoutId);
         
         if (!response.ok) {
-            throw new Error(`SearXNG error: ${response.status} ${response.statusText}`);
+            throw createError(
+                SearchErrorCode.NETWORK_ERROR,
+                `SearXNG error: ${response.status} ${response.statusText}`,
+                { status: response.status, statusText: response.statusText },
+                response.status >= 500 // Retryable for server errors
+            );
         }
         
         const data = await response.json();
@@ -493,6 +536,7 @@ async function generateAIAnswer(query: string, results: any[], piContext: any) {
         return `Based on ${results.length} search results:\n\n${results.slice(0, 3).map(r => `• ${r.title}: ${r.snippet.substring(0, 150)}...`).join('\n\n')}`;
     } catch (error) {
         console.error('AI answer generation failed:', error);
+        // Return fallback instead of throwing
         return `Search found ${results.length} results. ${results.slice(0, 3).map(r => r.title).join(', ')}`;
     }
 }
@@ -577,7 +621,12 @@ async function fetchUrlContent(url: string, maxLength = 2000, prompt?: string) {
     try {
         // Comprehensive URL validation for SSRF protection
         if (!isUrlSafeForFetching(url)) {
-            throw new Error('URL is not safe for fetching. Blocked to prevent SSRF attacks.');
+            throw createError(
+                SearchErrorCode.SSRF_BLOCKED,
+                'URL is not safe for fetching. Blocked to prevent SSRF attacks.',
+                { url },
+                false
+            );
         }
         
         // Use AbortController for timeout
@@ -595,7 +644,12 @@ async function fetchUrlContent(url: string, maxLength = 2000, prompt?: string) {
         clearTimeout(timeoutId);
         
         if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            throw createError(
+                SearchErrorCode.NETWORK_ERROR,
+                `HTTP ${response.status}: ${response.statusText}`,
+                { status: response.status, statusText: response.statusText, url },
+                response.status >= 500
+            );
         }
         
         const html = await response.text();
@@ -640,7 +694,17 @@ async function fetchUrlContent(url: string, maxLength = 2000, prompt?: string) {
         };
     } catch (error) {
         console.error('Content fetch error:', error);
-        throw error;
+        // Re-throw structured error or wrap generic error
+        if (error && typeof error === 'object' && 'code' in error) {
+            throw error;
+        } else {
+            throw createError(
+                SearchErrorCode.NETWORK_ERROR,
+                error instanceof Error ? error.message : 'Content fetch failed',
+                { url },
+                true
+            );
+        }
     }
 }
 
@@ -666,7 +730,15 @@ async function unifiedSearch(params: {
         return {
             success: false,
             query,
-            error: 'Rate limit exceeded. Please wait a few seconds before searching again.',
+            error: createError(
+                SearchErrorCode.RATE_LIMIT_EXCEEDED,
+                'Rate limit exceeded. Please wait a few seconds before searching again.',
+                { 
+                    remainingTokens: rateLimiter.getRemainingTokens('global'),
+                    timeUntilNextToken: rateLimiter.getTimeUntilNextToken('global')
+                },
+                true
+            ),
             processing_time_ms: Date.now() - startTime
         };
     }
@@ -687,7 +759,12 @@ async function unifiedSearch(params: {
         return {
             success: false,
             query,
-            error: 'Query contains prohibited content and cannot be processed.',
+            error: createError(
+                SearchErrorCode.QUERY_BLOCKED,
+                'Query contains prohibited content and cannot be processed.',
+                { query, sanitizationLevel: SANITIZATION_LEVEL },
+                false
+            ),
             processing_time_ms: Date.now() - startTime
         };
     }
@@ -712,7 +789,12 @@ async function unifiedSearch(params: {
             return {
                 success: false,
                 query,
-                error: 'No search results found',
+                error: createError(
+                    SearchErrorCode.NO_RESULTS,
+                    'No search results found',
+                    { query },
+                    true
+                ),
                 processing_time_ms: Date.now() - startTime
             };
         }
@@ -753,10 +835,25 @@ async function unifiedSearch(params: {
         return result;
     } catch (error) {
         console.error('Search failed:', error);
+        // Handle structured errors
+        if (error && typeof error === 'object' && 'code' in error) {
+            return {
+                success: false,
+                query,
+                error,
+                processing_time_ms: Date.now() - startTime
+            };
+        }
+        
         return {
             success: false,
             query,
-            error: `Search failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            error: createError(
+                SearchErrorCode.SEARCH_FAILED,
+                `Search failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                { originalError: error instanceof Error ? error.message : error },
+                true
+            ),
             processing_time_ms: Date.now() - startTime
         };
     }
@@ -834,7 +931,23 @@ export default async function (pi: any): Promise<void> {
             // Format the response for PI
             let text = '';
             if (!result.success) {
-                text = `**Search Error**\n\n${result.error || 'Unknown error'}`;
+                // Handle structured errors
+                try {
+                    const error = result.error as any;
+                    if (error && typeof error === 'object' && error.code) {
+                        text = `**Search Error (${error.code})**\n\n${error.message || 'Unknown error'}`;
+                        if (error.details && Object.keys(error.details).length > 0) {
+                            text += `\n\n**Details:** ${JSON.stringify(error.details, null, 2)}`;
+                        }
+                        if (error.retryable) {
+                            text += '\n\n**Note:** This error is retryable.';
+                        }
+                    } else {
+                        text = `**Search Error**\n\n${result.error || 'Unknown error'}`;
+                    }
+                } catch (e) {
+                    text = `**Search Error**\n\n${typeof result.error === 'string' ? result.error : 'Unknown error'}`;
+                }
             } else {
                 text = `## Search Results\n\n`;
                 text += `**Query:** ${result.query}\n`;
@@ -942,13 +1055,31 @@ export default async function (pi: any): Promise<void> {
                     isError: false
                 };
             } catch (error) {
-                let text = `**Fetch Content Error**\n\nFailed to fetch content: ${error instanceof Error ? error.message : 'Unknown error'}`;
+                // Handle structured errors
+                let errorMessage = 'Unknown error';
+                let errorCode = SearchErrorCode.UNKNOWN_ERROR;
+                let retryable = false;
+                
+                if (error && typeof error === 'object') {
+                    const err = error as any;
+                    if ('code' in err) {
+                        errorMessage = err.message || 'Fetch failed';
+                        errorCode = err.code as SearchErrorCode;
+                        retryable = err.retryable || false;
+                    } else if ('message' in err) {
+                        errorMessage = err.message;
+                    }
+                } else if (error instanceof Error) {
+                    errorMessage = error.message;
+                }
+                
+                let text = `**Fetch Content Error**\n\nFailed to fetch content: ${errorMessage}`;
                 
                 return {
                     content: [{ type: 'text', text }],
                     details: { 
                         success: false, 
-                        error: error instanceof Error ? error.message : 'Unknown error' 
+                        error: createError(errorCode, errorMessage, { url: params.url }, retryable)
                     },
                     isError: true
                 };
