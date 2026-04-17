@@ -19,6 +19,13 @@ dist/
 *.log
 *.tsbuildinfo
 
+# GSD package cache
+.pi/
+.pi/gsd-file-manifest.json
+
+# Cache directories
+cache/
+
 # OS files
 .DS_Store
 Thumbs.db
