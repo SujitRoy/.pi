@@ -29,9 +29,8 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const RATE_LIMIT_REQUESTS = 5;
 const RATE_LIMIT_WINDOW_MS = 10000; // 10 seconds
 
-// Cache and rate limiting
+// Cache
 const searchCache = new Map();
-const requestTimestamps: number[] = [];
 
 // Clean cache periodically
 setInterval(() => {
@@ -43,20 +42,102 @@ setInterval(() => {
     }
 }, 60000); // Clean every minute
 
-// Rate limiting check
-function checkRateLimit(): boolean {
-    const now = Date.now();
-    // Remove old timestamps
-    while (requestTimestamps.length > 0 && requestTimestamps[0] < now - RATE_LIMIT_WINDOW_MS) {
-        requestTimestamps.shift();
+// Rate limiting with token bucket algorithm
+class TokenBucketRateLimiter {
+    private buckets: Map<string, { tokens: number; lastRefill: number }> = new Map();
+    private cleanupInterval: any;
+    
+    constructor(
+        private tokensPerInterval: number = RATE_LIMIT_REQUESTS,
+        private intervalMs: number = RATE_LIMIT_WINDOW_MS,
+        private maxBurst: number = RATE_LIMIT_REQUESTS * 2
+    ) {
+        // Clean up old buckets every 5 minutes
+        this.cleanupInterval = setInterval(() => this.cleanup(), 5 * 60 * 1000);
     }
     
-    if (requestTimestamps.length >= RATE_LIMIT_REQUESTS) {
+    // Get or create a bucket for a key (user/IP/session)
+    private getBucket(key: string) {
+        let bucket = this.buckets.get(key);
+        const now = Date.now();
+        
+        if (!bucket) {
+            bucket = {
+                tokens: this.maxBurst,
+                lastRefill: now
+            };
+            this.buckets.set(key, bucket);
+            return bucket;
+        }
+        
+        // Refill tokens based on time elapsed
+        const timePassed = now - bucket.lastRefill;
+        if (timePassed > this.intervalMs) {
+            const intervalsPassed = Math.floor(timePassed / this.intervalMs);
+            const tokensToAdd = intervalsPassed * this.tokensPerInterval;
+            bucket.tokens = Math.min(this.maxBurst, bucket.tokens + tokensToAdd);
+            bucket.lastRefill = now;
+        }
+        
+        return bucket;
+    }
+    
+    // Check if a request is allowed
+    isAllowed(key: string = 'global'): boolean {
+        const bucket = this.getBucket(key);
+        
+        if (bucket.tokens >= 1) {
+            bucket.tokens -= 1;
+            return true;
+        }
+        
         return false;
     }
     
-    requestTimestamps.push(now);
-    return true;
+    // Get remaining tokens
+    getRemainingTokens(key: string = 'global'): number {
+        const bucket = this.getBucket(key);
+        return Math.max(0, bucket.tokens);
+    }
+    
+    // Get time until next token (in ms)
+    getTimeUntilNextToken(key: string = 'global'): number {
+        const bucket = this.getBucket(key);
+        if (bucket.tokens >= 1) return 0;
+        
+        const now = Date.now();
+        const timeSinceLastRefill = now - bucket.lastRefill;
+        const timeUntilNextRefill = this.intervalMs - timeSinceLastRefill;
+        return Math.max(0, timeUntilNextRefill);
+    }
+    
+    // Clean up old buckets (older than 1 hour)
+    private cleanup() {
+        const oneHourAgo = Date.now() - (60 * 60 * 1000);
+        for (const [key, bucket] of this.buckets.entries()) {
+            if (bucket.lastRefill < oneHourAgo && bucket.tokens >= this.maxBurst) {
+                this.buckets.delete(key);
+            }
+        }
+    }
+    
+    // Get stats
+    getStats() {
+        return {
+            totalBuckets: this.buckets.size,
+            tokensPerInterval: this.tokensPerInterval,
+            intervalMs: this.intervalMs,
+            maxBurst: this.maxBurst
+        };
+    }
+}
+
+// Create rate limiter instance
+const rateLimiter = new TokenBucketRateLimiter();
+
+// Rate limiting check (maintains backward compatibility)
+function checkRateLimit(): boolean {
+    return rateLimiter.isAllowed('global');
 }
 
 // Query sanitization to avoid 500 errors
@@ -500,16 +581,21 @@ function searchHealth() {
             'N/A'
     };
     
-    const rateLimitStats = {
-        recent_requests: requestTimestamps.length,
-        window_remaining_ms: RATE_LIMIT_WINDOW_MS - (now - (requestTimestamps[0] || now))
-    };
+    const rateLimiterStats = rateLimiter.getStats();
+    const globalRemaining = rateLimiter.getRemainingTokens('global');
+    const timeUntilNext = rateLimiter.getTimeUntilNextToken('global');
     
     return {
         status: 'healthy',
         searxng_url: SEARXNG_BASE,
         cache: cacheStats,
-        rate_limiting: rateLimitStats,
+        rate_limiting: {
+            ...rateLimiterStats,
+            global_remaining_tokens: globalRemaining,
+            global_time_until_next_token_ms: timeUntilNext,
+            algorithm: 'token_bucket',
+            recent_requests: 'N/A (deprecated - use token bucket stats)'
+        },
         timestamp: new Date().toISOString()
     };
 }
