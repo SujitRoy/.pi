@@ -6,9 +6,8 @@
   "theme": "tokyo-night",
   "enabledModels": [],
   "packages": [
-    "extensions/dist/pi-search.js",
-    "extensions/dist/planning.js",
-    "extensions/dist/git-tools.js",
+    "extensions\\dist\\pi-search.js",
+    "extensions\\planning.js",
     "npm:pi-gsd"
   ]
 }
