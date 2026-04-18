@@ -1,13 +1,13 @@
 {
-  "lastChangelogVersion": "0.67.2",
+  "lastChangelogVersion": "0.67.68",
   "defaultProvider": "agentrouter",
   "defaultModel": "deepseek-v3.2",
   "defaultThinkingLevel": "high",
   "theme": "tokyo-night",
   "enabledModels": [],
   "packages": [
-    "extensions\\dist\\pi-search.js",
-    "extensions\\planning.js",
+    "extensions/pi-search.js",
+    "extensions/planning.js",
     "npm:pi-gsd"
   ]
 }

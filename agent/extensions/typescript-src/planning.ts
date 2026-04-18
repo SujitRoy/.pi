@@ -187,8 +187,8 @@ const efficiencyCheck = {
   }
 };
 
-// Export the extension
-export default {
+// Export the extension as a factory function
+export default (pi: any) => ({
   name: 'planning',
   version: '1.0.0',
   description: 'Planning and validation tools for GEMINI.md compliance',
@@ -201,4 +201,4 @@ export default {
   onInitialize: (pi: any) => {
     console.log('✅ Planning extension loaded - GEMINI.md compliance enabled');
   }
-};
+});

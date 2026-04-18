@@ -322,15 +322,33 @@ function validateCwd(cwd?: string): string {
  * Validate that directory is a git repository
  */
 async function validateGitRepo(workingDir: string): Promise<boolean> {
-  try {
-    await execFileAsync('git', ['rev-parse', '--git-dir'], {
-      cwd: workingDir,
-      timeout: 5000
-    });
-    return true;
-  } catch {
-    throw new Error(`Not a git repository: ${workingDir}`);
+  // Check manually for .git directory to avoid git command output
+  import * as fs from 'fs';
+  import * as path from 'path';
+  
+  function checkGitDir(dir: string): boolean {
+    const gitDir = path.join(dir, '.git');
+    try {
+      const stat = fs.statSync(gitDir);
+      return stat.isDirectory();
+    } catch {
+      return false;
+    }
   }
+  
+  // Check current directory and parent directories
+  let currentDir = workingDir;
+  while (currentDir && currentDir !== '/') {
+    if (checkGitDir(currentDir)) {
+      return true;
+    }
+    const parentDir = path.dirname(currentDir);
+    if (parentDir === currentDir) break; // reached root
+    currentDir = parentDir;
+  }
+  
+  // Not a git repository
+  throw new Error(`Not a git repository: ${workingDir}`);
 }
 
 /**
