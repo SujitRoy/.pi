@@ -9,6 +9,7 @@
     "extensions/footer-status.js",
     "extensions/pi-search.js",
     "extensions/planning.js",
+    "extensions/session-exit-summary.js",
     "npm:pi-gsd"
   ]
 }
