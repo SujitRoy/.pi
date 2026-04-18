@@ -7,11 +7,13 @@
  * - Working directory
  * - Model used (provider + model ID)
  * - Total turns (agent interactions)
- * - Token usage: input, output, total, cache read/write, total cost
+ * - Token usage: input, output, total, cache read/write
  * - Context usage percentage
- * - Number of tool calls made
  * - Session duration (elapsed time)
  * - Number of messages exchanged
+ *
+ * Note: Cost calculation is removed as provider rates vary and
+ * accurate cost data may not be available in session entries.
  *
  * The summary is printed via a notification and also appended as a custom
  * entry for persistence.
@@ -40,12 +42,6 @@ function formatDuration(ms: number): string {
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
   return `${hours}h ${mins}m`;
-}
-
-function formatCost(cost: number): string {
-  if (cost === 0) return "$0";
-  if (cost < 0.01) return `$${cost.toFixed(4)}`;
-  return `$${cost.toFixed(3)}`;
 }
 
 /**
@@ -95,7 +91,6 @@ function buildSummary(ctx: ExtensionContext, startTime: number): string {
   let totalOutput = 0;
   let totalCacheRead = 0;
   let totalCacheWrite = 0;
-  let totalCost = 0;
   let userMessages = 0;
 
   for (const entry of entries) {
@@ -106,7 +101,6 @@ function buildSummary(ctx: ExtensionContext, startTime: number): string {
         totalOutput += entry.message.usage.output || 0;
         totalCacheRead += entry.message.usage.cacheRead || 0;
         totalCacheWrite += entry.message.usage.cacheWrite || 0;
-        totalCost += entry.message.usage.cost?.total || 0;
       } else if (entry.message.role === "user") {
         userMessages++;
       }
@@ -132,10 +126,6 @@ function buildSummary(ctx: ExtensionContext, startTime: number): string {
   if (totalCacheWrite > 0) {
     lines.push(`             Cache W:   W ${formatTokens(totalCacheWrite)}`);
   }
-  lines.push("");
-
-  // Cost
-  lines.push(`  \u{1F4B0}  Cost       ${formatCost(totalCost)}`);
   lines.push("");
 
   // Context
