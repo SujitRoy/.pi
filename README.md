@@ -220,10 +220,11 @@ Displays a rich summary when you exit a session (Ctrl+C):
 - Model used (provider + model ID)
 - Total turns (agent interactions)
 - Token usage: input, output, total, cache read/write
-- Total cost
 - Context usage percentage
 - Number of messages exchanged
 - Session duration (elapsed time)
+
+**Note:** Cost calculation is not included because provider pricing rates vary and accurate cost data may not be available in session entries.
 
 **Installation:**
 Add to your `settings.json` packages list:
