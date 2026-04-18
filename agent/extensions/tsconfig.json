@@ -8,10 +8,11 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "outDir": "./dist",
+    "rootDir": "./typescript-src",
     "resolveJsonModule": true,
     "ignoreDeprecations": "6.0",
     "noImplicitAny": false
   },
-  "include": ["*.ts"],
+  "include": ["typescript-src/*.ts"],
   "exclude": ["dist", "node_modules"]
 }

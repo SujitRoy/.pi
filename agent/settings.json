@@ -6,6 +6,7 @@
   "theme": "tokyo-night",
   "enabledModels": [],
   "packages": [
+    "extensions/footer-status.js",
     "extensions/pi-search.js",
     "extensions/planning.js",
     "npm:pi-gsd"
