@@ -181,6 +181,136 @@ fetch_content({ url: "https://example.com/long-article", maxLength: 5000 })
 - Automatic redirect following (up to 5 hops)
 - Intelligent caching (5-min TTL)
 
+### Custom Footer Extension
+
+Replaces the built-in footer with a custom multicolor component showing enhanced session stats:
+
+**Features:**
+- Git branch and working directory status
+- Git stats (staged, modified, untracked, deleted files)
+- Context usage percentage and token counts
+- Model information with provider
+- Thinking level display (with Shift+Tab cycling)
+- Session token usage (input/output/total/cache)
+- Total cost
+- Session name and turn count
+- Extension status lines from other extensions
+
+**Installation:**
+Add to your `settings.json` packages list:
+```json
+{
+  "packages": [
+    "extensions/footer-status.js",
+    // ... other packages
+  ]
+}
+```
+
+**Usage:**
+The footer loads automatically when PI starts. Use **Shift+Tab** to cycle through thinking levels (off → minimal → low → medium → high → xhigh → off).
+
+### Session Exit Summary Extension
+
+Displays a rich summary when you exit a session (Ctrl+C):
+
+**Features:**
+- Session ID and name
+- Working directory
+- Model used (provider + model ID)
+- Total turns (agent interactions)
+- Token usage: input, output, total, cache read/write
+- Total cost
+- Context usage percentage
+- Number of messages exchanged
+- Session duration (elapsed time)
+
+**Installation:**
+Add to your `settings.json` packages list:
+```json
+{
+  "packages": [
+    "extensions/session-exit-summary.js",
+    // ... other packages
+  ]
+}
+```
+
+**Usage:**
+The summary appears automatically when you exit a session with Ctrl+C.
+
+### All Available Extensions
+
+This repository includes several useful extensions:
+
+| Extension | Description | How to Install |
+|-----------|-------------|----------------|
+| `footer-status.js` | Enhanced multicolor footer with stats | Add to `settings.json` packages |
+| `session-exit-summary.js` | Session summary on exit (Ctrl+C) | Add to `settings.json` packages |
+| `pi-search.js` | Web search and content fetching | See Web Search Extension above |
+| `planning.js` | Planning assistant tools | Add to `settings.json` packages |
+| `git-tools.js` | Git operations as callable tools | Not enabled by default |
+| `theme-aurora.js` | Custom theme management | Not enabled by default |
+
+**Complete Example `settings.json`:**
+```json
+{
+  "defaultProvider": "agentrouter",
+  "defaultModel": "deepseek-v3.2",
+  "defaultThinkingLevel": "high",
+  "theme": "tokyo-night",
+  "packages": [
+    "extensions/footer-status.js",
+    "extensions/pi-search.js",
+    "extensions/planning.js",
+    "extensions/session-exit-summary.js",
+    "npm:pi-gsd"
+  ]
+}
+```
+
+### Building Extensions from Source
+
+The extensions are written in TypeScript and compiled to JavaScript. If you want to modify them:
+
+1. **Navigate to the extensions directory:**
+   ```bash
+   cd ~/.pi/agent/extensions
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   npm install
+   ```
+
+3. **Build all extensions:**
+   ```bash
+   npm run build
+   ```
+
+4. **Or build a specific extension:**
+   ```bash
+   npx tsc typescript-src/footer-status.ts --outDir ./dist --target ES2020 --module commonjs --moduleResolution node --skipLibCheck true --esModuleInterop true
+   ```
+
+**Note:** The TypeScript compilation requires `@mariozechner/pi-coding-agent` types which are only available when running within PI. For development, you may need to disable strict type checking or compile with `skipLibCheck: true`.
+
+**Project Structure:**
+```
+extensions/
+├── typescript-src/          # TypeScript source files
+│   ├── footer-status.ts
+│   ├── session-exit-summary.ts
+│   ├── pi-search.ts
+│   ├── planning.ts
+│   ├── git-tools.ts
+│   └── theme-aurora.ts
+├── dist/                    # Compiled JavaScript files
+├── *.js                    # Symlinks to dist/ files
+├── package.json            # Build dependencies
+└── tsconfig.json           # TypeScript configuration
+```
+
 ## Syncing Across Machines
 
 Push changes:
