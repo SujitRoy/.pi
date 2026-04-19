@@ -127,13 +127,14 @@ function validateCwd(cwd: string): string {
 function getGitBranch(cwd: string): string | null {
   const dir = validateCwd(cwd);
   try {
-    const branch = execSync("git branch --show-current", {
+    // Redirect stderr to /dev/null to suppress "not a git repository" messages
+    const branch = execSync("git branch --show-current 2>/dev/null", {
       cwd: dir,
       timeout: 2000,
       encoding: "utf8",
     }).trim();
     if (branch) return branch;
-    const head = execSync("git rev-parse --short HEAD", {
+    const head = execSync("git rev-parse --short HEAD 2>/dev/null", {
       cwd: dir,
       timeout: 2000,
       encoding: "utf8",
@@ -147,7 +148,8 @@ function getGitBranch(cwd: string): string | null {
 function getWorkingTreeStats(cwd: string) {
   const dir = validateCwd(cwd);
   try {
-    const output = execSync("git status --porcelain", {
+    // Redirect stderr to /dev/null to suppress "not a git repository" messages
+    const output = execSync("git status --porcelain 2>/dev/null", {
       cwd: dir,
       timeout: 2000,
       encoding: "utf8",

@@ -1,20 +1,11 @@
 {
   "name": "pi-agent-extensions",
   "version": "1.0.0",
-  "description": "PI Agent extensions",
-  "scripts": {
-    "build": "tsc",
-    "build:search": "tsc pi-search.ts --outDir ./dist",
-    "watch": "tsc --watch"
-  },
-  "devDependencies": {
-    "@types/node": "^20.0.0",
-    "typescript": "^6.0.0"
-  },
-  "type": "commonjs",
+  "description": "Pi Agent Extensions - Follows official extension guidelines",
+  "private": true,
   "dependencies": {
     "@sinclair/typebox": "^0.34.49",
-    "lru-cache": "^11.3.5",
+    "@mariozechner/pi-ai": "^0.67.68",
     "node-html-parser": "^7.1.0"
   }
 }

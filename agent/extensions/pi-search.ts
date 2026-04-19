@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 /**
  * Robust Web Search Extension for PI Agent
  * 
@@ -17,14 +15,80 @@
  * - fetch_content: URL content extraction
  */
 
+import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
 import { Type } from '@sinclair/typebox';
-import { parse } from 'node-html-parser';
+// parse will be imported dynamically
 
 // Configuration
-const DEFAULT_SEARXNG_URL = "http://140.238.166.109:8081";
-// Use global process if available, otherwise default
+// SearXNG instance URL - must be configured via environment variable or config
+// Set SEARXNG_BASE_URL environment variable to use your own SearXNG instance
+// Example: export SEARXNG_BASE_URL="http://localhost:8081"
+// Or create ~/.pi/agent/search-config.json with {"searxngUrl": "http://localhost:8081"}
 declare const process: any;
-const SEARXNG_BASE = (typeof process !== 'undefined' && process.env && process.env.SEARXNG_BASE_URL) || DEFAULT_SEARXNG_URL;
+
+function getSearxngUrl(): string {
+  // First priority: Environment variable
+  if (typeof process !== 'undefined' && process.env && process.env.SEARXNG_BASE_URL) {
+    const envUrl = process.env.SEARXNG_BASE_URL.trim();
+    if (envUrl) {
+      console.log('[pi-search] Using SearXNG URL from environment: ', envUrl);
+      return envUrl;
+    }
+  }
+  
+  // Second priority: Configuration file
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const os = require('os');
+    
+    const configPaths = [
+      path.join(os.homedir(), '.pi', 'agent', 'search-config.json'),
+      path.join(os.homedir(), '.pi-search-config.json'),
+      path.join(process.cwd(), '.pi-search-config.json')
+    ];
+    
+    for (const configPath of configPaths) {
+      if (fs.existsSync(configPath)) {
+        const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        if (config.searxngUrl && typeof config.searxngUrl === 'string') {
+          const fileUrl = config.searxngUrl.trim();
+          if (fileUrl) {
+            console.log('[pi-search] Using SearXNG URL from config file: ', fileUrl);
+            return fileUrl;
+          }
+        }
+      }
+    }
+  } catch (error) {
+    // Silently ignore config file errors
+  }
+  
+  // No configuration found
+  throw new Error(
+    'SearXNG URL not configured. Please set SEARXNG_BASE_URL environment variable or create a config file.\n' +
+    'Options:\n' +
+    '1. Set environment variable: export SEARXNG_BASE_URL="http://localhost:8081"\n' +
+    '2. Create ~/.pi/agent/search-config.json: {\"searxngUrl\": \"http://localhost:8081\"}\n' +
+    '3. Use a public SearXNG instance (see https://searx.space/ for public instances)'
+  );
+}
+
+// Initialize on first use (lazy initialization)
+let SEARXNG_BASE: string | null = null;
+let initializationError: string | null = null;
+
+function getSearxngBase(): string {
+  if (SEARXNG_BASE !== null) return SEARXNG_BASE;
+  
+  try {
+    SEARXNG_BASE = getSearxngUrl();
+    return SEARXNG_BASE;
+  } catch (error) {
+    initializationError = error instanceof Error ? error.message : String(error);
+    throw error;
+  }
+}
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const RATE_LIMIT_REQUESTS = 5;
 const RATE_LIMIT_WINDOW_MS = 10000; // 10 seconds
@@ -450,7 +514,7 @@ function classifyQuery(query: string): 'simple' | 'complex' | 'research' {
 // Perform SearXNG search
 async function performSearxngSearch(query: string, category = 'general', maxResults = 10) {
     try {
-        const url = `${SEARXNG_BASE}/search`;
+        const url = `${getSearxngBase()}/search`;
         const params = new URLSearchParams({
             q: query,
             format: 'json',
@@ -655,6 +719,7 @@ async function fetchUrlContent(url: string, maxLength = 2000, prompt?: string) {
         const html = await response.text();
         
         // Parse HTML with proper parser
+        const { parse } = await import('node-html-parser');
         const root = parse(html);
         
         // Extract title
@@ -870,9 +935,19 @@ function searchHealth() {
     const globalRemaining = rateLimiter.getRemainingTokens('global');
     const timeUntilNext = rateLimiter.getTimeUntilNextToken('global');
     
+    let searxngUrl = 'Not configured';
+    let status = 'healthy';
+    
+    try {
+      searxngUrl = getSearxngBase();
+    } catch (error) {
+      status = 'configuration_required';
+      searxngUrl = 'Not configured - ' + (error instanceof Error ? error.message : String(error));
+    }
+    
     return {
-        status: 'healthy',
-        searxng_url: SEARXNG_BASE,
+        status,
+        searxng_url: searxngUrl,
         cache: cacheStats,
         sanitization: {
             level: SANITIZATION_LEVEL,
@@ -890,7 +965,7 @@ function searchHealth() {
 }
 
 // Export the extension
-export default async function (pi: any): Promise<void> {
+export default async function (pi: ExtensionAPI): Promise<void> {
     // Minimal logging - only errors
     if (!pi.registerTool) {
         console.error('[pi-search] ERROR: pi.registerTool not available!');

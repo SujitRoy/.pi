@@ -1,0 +1,22 @@
+{
+  "searxngUrl": "http://localhost:8081",
+  "notes": "Copy this file to ~/.pi/agent/search-config.json and update the URL",
+  "configurationOptions": [
+    {
+      "option": "Local SearXNG instance",
+      "url": "http://localhost:8081",
+      "description": "If running SearXNG locally via Docker or direct installation"
+    },
+    {
+      "option": "Public SearXNG instance",
+      "url": "https://search.example.com",
+      "description": "Find public instances at https://searx.space/",
+      "warning": "Check privacy policy of public instances before use"
+    },
+    {
+      "option": "Environment variable",
+      "method": "export SEARXNG_BASE_URL=\"http://your-instance:port\"",
+      "description": "Set environment variable in your shell profile"
+    }
+  ]
+}

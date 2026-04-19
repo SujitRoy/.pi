@@ -99,7 +99,7 @@ const AURORA_THEME = {
   },
 };
 
-export default async function (): Promise<void> {
+export default async function (pi: ExtensionAPI): Promise<void> {
   try {
     const fs = await import("fs");
     const path = await import("path");
@@ -116,9 +116,7 @@ export default async function (): Promise<void> {
       }
       const resolved = path.resolve(rawDir);
       if (!resolved.startsWith(homeDir)) {
-        console.warn(
-          `[theme-aurora] PI_AGENT_DIR "${rawDir}" is outside home directory, using default`,
-        );
+        // Silently use default if PI_AGENT_DIR is outside home directory
         agentDir = defaultDir;
       } else {
         agentDir = resolved;

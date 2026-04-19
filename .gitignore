@@ -1,45 +1,49 @@
-# Authentication and secrets
-agent/auth.json
-agent/models.json
-*.env
-*.key
-*.pem
+# Pi Configuration
+agent/search-config.json
+agent/extensions/search-config.json
 
-# Session data (personal conversation history)
-agent/sessions/
-*.jsonl
-*.session.json
+# Node.js dependencies
+agent/extensions/node_modules/
+agent/extensions/package-lock.json
 
-# Binary tools (downloaded by PI automatically)
-agent/bin/
+# Backup directories
+agent/extensions/backup-old-setup/
 
-# Build and cache
-node_modules/
-dist/
-*.log
-*.tsbuildinfo
+# Build artifacts
+agent/extensions/dist/
+*.js
+!agent/extensions/*.ts
 
-# GSD package cache
-.pi/
-.pi/gsd-file-manifest.json
+# Personal configuration directories
+gsd/
+.personal/
+private/
 
-# Cache directories
-cache/
-
-# Planning/scratch documents (not production code)
-ai-enhanced-web-search.md
-hybrid-web-search-plan.md
-GIT_TOOLS_IMPROVEMENTS.md
-GIT_TOOLS_REVIEW.md
-
-# OS files
+# OS generated files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
-desktop.ini
 
 # Editor files
+.vscode/
+.idea/
 *.swp
 *.swo
 *~
-.vscode/
-.idea/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Temporary files
+tmp/
+temp/

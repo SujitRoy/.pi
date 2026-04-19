@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 /**
  * PI Agent Extension: Git Tools (Enhanced & Secured)
  *
@@ -44,6 +42,7 @@ import * as os from 'os';
 import * as fs from 'fs';
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
 import { Type } from '@sinclair/typebox';
+import { StringEnum } from '@mariozechner/pi-ai';
 
 const execFileAsync = promisify(execFile);
 
@@ -323,8 +322,7 @@ function validateCwd(cwd?: string): string {
  */
 async function validateGitRepo(workingDir: string): Promise<boolean> {
   // Check manually for .git directory to avoid git command output
-  import * as fs from 'fs';
-  import * as path from 'path';
+  // (fs and path are already imported at top level)
   
   function checkGitDir(dir: string): boolean {
     const gitDir = path.join(dir, '.git');
