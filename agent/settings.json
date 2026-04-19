@@ -11,5 +11,16 @@
     "extensions/planning.js",
     "extensions/session-exit-summary.js",
     "npm:pi-gsd"
-  ]
+  ],
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 2048,
+    "keepRecentTokens": 80000
+  },
+  "retry": {
+    "enabled": true,
+    "maxRetries": 5,
+    "baseDelayMs": 1000,
+    "maxDelayMs": 30000
+  }
 }

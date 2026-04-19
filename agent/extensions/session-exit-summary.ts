@@ -11,6 +11,7 @@
  * - Context usage percentage
  * - Session duration (elapsed time)
  * - Number of messages exchanged
+ * - Resume command to continue session
  *
  * Note: Cost calculation is removed as provider rates vary and
  * accurate cost data may not be available in session entries.
@@ -52,6 +53,22 @@ function rule(char: string = "\u2500", width: number = 60): string {
 }
 
 /**
+ * Extract session ID from session manager
+ * Validates that we're getting the correct session ID format
+ */
+function getValidatedSessionId(ctx: ExtensionContext): string {
+  const sessionId = ctx.sessionManager.getSessionId?.() || "unknown";
+  
+  // Validate session ID format (UUID-like or other valid format)
+  // Session IDs should be non-empty strings
+  if (!sessionId || sessionId.trim() === "") {
+    return "unknown-session-id";
+  }
+  
+  return sessionId;
+}
+
+/**
  * Build the session summary text
  */
 function buildSummary(ctx: ExtensionContext, startTime: number): string {
@@ -63,12 +80,19 @@ function buildSummary(ctx: ExtensionContext, startTime: number): string {
   lines.push(rule("\u2501", W));
   lines.push("");
 
-  // Session info
-  const sessionId = ctx.sessionManager.getSessionId?.() || "unknown";
+  // Session info with validated session ID
+  const sessionId = getValidatedSessionId(ctx);
   const sessionName = ctx.sessionManager.getSessionName();
   const cwd = ctx.cwd;
+  
   lines.push(`  \u{1F4C1}  Session    ${sessionName ? sessionName : sessionId.slice(0, 12)}`);
-  if (sessionName) lines.push(`             ID: ${sessionId.slice(0, 16)}`);
+  lines.push(`             ID: ${sessionId}`);
+  
+  // Provide clear resume instructions
+  // Pi accepts partial UUIDs for resuming sessions
+  const partialId = sessionId.slice(0, 16);
+  lines.push(`             To resume: pi --session ${partialId}`);
+  lines.push(`             Or: cd ${cwd} && pi --session ${partialId}`);
   lines.push(`  \u{1F4CD}  Directory  ${cwd}`);
   lines.push("");
 
@@ -141,6 +165,14 @@ function buildSummary(ctx: ExtensionContext, startTime: number): string {
   // Duration
   lines.push(`  \u23F1\uFE0F  Duration   ${formatDuration(duration)}`);
   lines.push("");
+  
+  // Additional resume options
+  lines.push(`  \u{1F4DD}  Notes:`);
+  lines.push(`             • Use 'pi -c' to continue most recent session`);
+  lines.push(`             • Use 'pi -r' to browse all sessions`);
+  lines.push(`             • Session file: sessions/.../${sessionId}.jsonl`);
+  lines.push("");
+  
   lines.push(rule("\u2501", W));
 
   return lines.join("\n");
@@ -157,13 +189,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
    * Track session start time
    */
   pi.on("session_start", async (_event: any, ctx: ExtensionContext) => {
-    sessionStartTimes.set(ctx.sessionManager.getSessionId?.() || "default", Date.now());
+    const sessionId = getValidatedSessionId(ctx);
+    sessionStartTimes.set(sessionId, Date.now());
   });
 
   pi.on("agent_start", async (_event: any, ctx: ExtensionContext) => {
-    const sid = ctx.sessionManager.getSessionId?.() || "default";
-    if (!sessionStartTimes.has(sid)) {
-      sessionStartTimes.set(sid, Date.now());
+    const sessionId = getValidatedSessionId(ctx);
+    if (!sessionStartTimes.has(sessionId)) {
+      sessionStartTimes.set(sessionId, Date.now());
     }
   });
 
@@ -171,14 +204,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
    * Show summary on session shutdown (Ctrl+C)
    */
   pi.on("session_shutdown", async (_event: any, ctx: ExtensionContext) => {
-    const sid = ctx.sessionManager.getSessionId?.() || "default";
-    const startTime = sessionStartTimes.get(sid) || Date.now();
+    const sessionId = getValidatedSessionId(ctx);
+    const startTime = sessionStartTimes.get(sessionId) || Date.now();
 
     try {
       const summary = buildSummary(ctx, startTime);
       ctx.ui.notify(summary, "info");
-    } catch {
-      // Ignore errors during shutdown
+      
+      // Log session ID for debugging
+      console.error(`[session-exit-summary] Session ID: ${sessionId}`);
+    } catch (error) {
+      console.error(`[session-exit-summary] Error generating summary: ${error}`);
     }
   });
 }
