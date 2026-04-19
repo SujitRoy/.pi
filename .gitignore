@@ -47,3 +47,15 @@ npm-debug.log*
 # Temporary files
 tmp/
 temp/
+# Personal Pi configuration files
+auth.json
+models.json
+sessions/
+bin/
+cache/
+gsd/
+agent/auth.json
+agent/models.json
+agent/sessions/
+agent/bin/
+agent/cache/
