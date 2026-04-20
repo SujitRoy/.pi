@@ -4,8 +4,9 @@
   "description": "Pi Agent Extensions - Follows official extension guidelines",
   "private": true,
   "dependencies": {
-    "@sinclair/typebox": "^0.34.49",
     "@mariozechner/pi-ai": "^0.67.68",
+    "@mariozechner/pi-coding-agent": "^0.67.68",
+    "@sinclair/typebox": "^0.34.49",
     "node-html-parser": "^7.1.0"
   }
 }
