@@ -250,6 +250,66 @@ interface ShowOptions {
   nameOnly?: boolean;
 }
 
+interface PrResult {
+  success: boolean;
+  error?: string;
+  prUrl?: string;
+  prNumber?: number;
+  remote?: string;
+  head?: string;
+  base?: string;
+  summary: string;
+}
+
+interface PrOptions {
+  draft?: boolean;
+  reviewer?: string;
+  assignee?: string;
+  label?: string;
+  project?: string;
+  milestone?: string;
+}
+
+interface PrResult {
+  success: boolean;
+  error?: string;
+  prUrl?: string;
+  prNumber?: number;
+  remote?: string;
+  head?: string;
+  base?: string;
+  summary: string;
+}
+
+interface PrOptions {
+  draft?: boolean;
+  reviewer?: string;
+  assignee?: string;
+  label?: string;
+  project?: string;
+  milestone?: string;
+}
+
+interface PrResult {
+  success: boolean;
+  error?: string;
+  prUrl?: string;
+  prNumber?: number;
+  remote?: string;
+  head?: string;
+  base?: string;
+  summary: string;
+}
+
+interface PrOptions {
+  draft?: boolean;
+  reviewer?: string;
+  assignee?: string;
+  label?: string;
+  project?: string;
+  milestone?: string;
+}
+
 // Extend execFileAsync result type
 interface ExecFileResult {
   stdout: string;
@@ -1466,6 +1526,137 @@ async function gitShow(commit: string, cwd?: string, options: ShowOptions = {}):
 }
 
 // ============================================================================
+// PR Creation (GitHub CLI)
+// ============================================================================
+
+/**
+ * Create a pull request using GitHub CLI (gh)
+ * This follows modern PR best practices and enforces repository PR templates
+ */
+async function gitPr(
+  cwd?: string,
+  base?: string,
+  title?: string,
+  body?: string,
+  options: PrOptions = {}
+): Promise<PrResult> {
+  const workingDir = validateCwd(cwd);
+
+  // Step 1: Validate it's a git repository
+  await validateGitRepo(workingDir);
+
+  // Step 2: Get current branch name
+  const branchResult = await executeGitCommand(workingDir, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (!branchResult.success) {
+    return {
+      success: false,
+      error: `Failed to get current branch: ${branchResult.error}`,
+      summary: ''
+    };
+  }
+  const currentBranch = branchResult.stdout.trim();
+  if (!currentBranch || currentBranch === 'HEAD') {
+    return {
+      success: false,
+      error: 'Not on a valid branch (detached HEAD?)',
+      summary: ''
+    };
+  }
+
+  // Step 3: Check if branch is ahead of remote (has commits to push)
+  const fetchResult = await executeGitCommand(workingDir, ['fetch', 'origin', currentBranch]);
+  // fetch might fail if branch doesn't exist on remote yet (that's OK)
+
+  // Check if there are local commits not on remote
+  const aheadResult = await executeGitCommand(workingDir, ['rev-list', '--count', `origin/${currentBranch}..HEAD`]);
+  const hasUnpushedCommits = aheadResult.success && parseInt(aheadResult.stdout.trim()) > 0;
+
+  // Step 4: Push branch if it has unpushed commits
+  if (hasUnpushedCommits) {
+    const pushResult = await gitPush('origin', currentBranch, workingDir, false);
+    if (!pushResult.success) {
+      return {
+        success: false,
+        error: `Failed to push branch to remote: ${pushResult.error}`,
+        head: currentBranch,
+        base: base || 'main',
+        summary: ''
+      };
+    }
+  }
+
+  // Step 5: Build gh pr create command
+  const args: string[] = ['pr', 'create'];
+
+  // Add base branch if specified
+  if (base) {
+    args.push('--base', base);
+  }
+
+  // Add title if provided
+  if (title) {
+    args.push('--title', title);
+  }
+
+  // Add body if provided
+  if (body) {
+    args.push('--body', body);
+  }
+
+  // Add options
+  if (options.draft) {
+    args.push('--draft');
+  }
+  if (options.reviewer) {
+    args.push('--reviewer', options.reviewer);
+  }
+  if (options.assignee) {
+    args.push('--assignee', options.assignee);
+  }
+  if (options.label) {
+    args.push('--label', options.label);
+  }
+  if (options.project) {
+    args.push('--project', options.project);
+  }
+  if (options.milestone) {
+    args.push('--milestone', options.milestone);
+  }
+
+  // Execute gh command
+  const result = await executeGitCommand(workingDir, args, { timeout: 60000 });
+
+  if (!result.success) {
+    return {
+      success: false,
+      error: result.stderr || result.error || 'Unknown error creating PR',
+      head: currentBranch,
+      base: base || 'main',
+      summary: ''
+    };
+  }
+
+  // Parse output to extract PR number and URL
+  // gh pr create typically outputs: "https://github.com/owner/repo/pull/123"
+  const output = result.stdout.trim();
+  const prMatch = output.match(/(https?:\/\/github\.com[^\s]+\/pull\/\d+)/);
+  const prNumberMatch = output.match(/\/pull\/(\d+)/);
+
+  const prUrl = prMatch ? prMatch[1] : undefined;
+  const prNumber = prNumberMatch ? parseInt(prNumberMatch[1]) : undefined;
+
+  return {
+    success: true,
+    prUrl,
+    prNumber,
+    remote: 'origin',
+    head: currentBranch,
+    base: base || 'main',
+    summary: `Pull request created successfully!\n\nBranch: ${currentBranch}\nTarget: ${base || 'main'}\n${prUrl ? `URL: ${prUrl}` : ''}`
+  };
+}
+
+// ============================================================================
 // Formatting Helpers
 // ============================================================================
 
@@ -2369,6 +2560,78 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         const err = error as Error;
         return {
           content: [{ type: 'text', text: `**Git Show Failed**\n\n${err.message}` }],
+          details: {},
+          isError: true
+        };
+      }
+    }
+  });
+
+  // Register git_pr tool
+  pi.registerTool({
+    name: 'git_pr',
+    label: 'Git PR',
+    description: 'Create a pull request using GitHub CLI (gh). Automatically pushes branch if needed and follows repo PR templates.',
+    parameters: Type.Object({
+      base: Type.Optional(Type.String({ description: 'Target branch (default: main)' })),
+      title: Type.Optional(Type.String({ description: 'PR title (default: first commit message or "New PR")' })),
+      body: Type.Optional(Type.String({ description: 'PR description (default: commit messages)' })),
+      draft: Type.Optional(Type.Boolean({ description: 'Create as draft PR' })),
+      reviewer: Type.Optional(Type.String({ description: 'Request reviewers (comma-separated for multiple)' })),
+      assignee: Type.Optional(Type.String({ description: 'Assign PR to user' })),
+      label: Type.Optional(Type.String({ description: 'Add labels (comma-separated for multiple)' })),
+      project: Type.Optional(Type.String({ description: 'Add to project' })),
+      milestone: Type.Optional(Type.String({ description: 'Add to milestone' })),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: {
+        base?: string;
+        title?: string;
+        body?: string;
+        draft?: boolean;
+        reviewer?: string;
+        assignee?: string;
+        label?: string;
+        project?: string;
+        milestone?: string;
+        cwd?: string;
+      },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
+      try {
+        const result = await gitPr(
+          params?.cwd,
+          params?.base,
+          params?.title,
+          params?.body,
+          {
+            draft: params?.draft || false,
+            reviewer: params?.reviewer,
+            assignee: params?.assignee,
+            label: params?.label,
+            project: params?.project,
+            milestone: params?.milestone
+          }
+        );
+
+        if (!result.success) {
+          return {
+            content: [{ type: 'text', text: `**Git PR Failed**\n\n${result.error}\n\nHead: ${result.head}\nBase: ${result.base}` }],
+            details: {},
+            isError: true
+          };
+        }
+
+        const text = `**Pull Request Created**\n\nBranch: \`${result.head}\` → \`${result.base}\`\n\n${result.summary}`;
+        return { content: [{ type: 'text', text }], details: { prUrl: result.prUrl, prNumber: result.prNumber } };
+      } catch (error) {
+        const err = error as Error;
+        return {
+          content: [{ type: 'text', text: `**Git PR Failed**\n\n${err.message}` }],
           details: {},
           isError: true
         };
