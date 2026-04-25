@@ -1591,12 +1591,28 @@ async function gitPr(
     args.push('--milestone', options.milestone);
   }
 
-  if (!shouldAutoPush) {
-    args.push('--no-push');
+  // Execute gh command using GitHub CLI (branch push is controlled by autoPush option above)
+  let result: { stdout: string; stderr: string };
+  try {
+    result = await execFileAsync('gh', args, {
+      cwd: workingDir,
+      timeout: 60000,
+      maxBuffer: 10 * 1024 * 1024,
+      encoding: 'utf8',
+      env: { ...process.env }
+    });
+  } catch (error) {
+    const err = error as ExecFileException & { exitCode?: number; stdout?: string; stderr?: string };
+    return {
+      success: false,
+      error: err.message,
+      stdout: err.stdout?.trim() || '',
+      stderr: err.stderr?.trim() || '',
+      exitCode: err.exitCode || err.code ? Number(err.exitCode || err.code) : undefined,
+      signal: err.signal,
+      killed: err.killed
+    };
   }
-
-  // Execute gh command
-  const result = await executeGitCommand(workingDir, args, { timeout: 60000 });
 
   if (!result.success) {
     return {
