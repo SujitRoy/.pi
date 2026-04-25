@@ -722,7 +722,7 @@ function filterByCredibility(results: any[], minScore = 0.7): any[] {
 }
 
 // Perform SearXNG search
-async function performSearxngSearch(query: string, category = 'general', maxResults = 10) {
+async function performSearxngSearch(query: string, category = 'general', maxResults = 10, externalSignal?: AbortSignal) {
     try {
         const url = `${getSearxngBase()}/search`;
         const params = new URLSearchParams({
@@ -734,9 +734,14 @@ async function performSearxngSearch(query: string, category = 'general', maxResu
             safesearch: '1'
         });
         
-        // Use AbortController for timeout
+        // Use AbortController for timeout and external cancellation
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 15000);
+        
+        // Link external signal to our controller
+        if (externalSignal) {
+          externalSignal.addEventListener('abort', () => controller.abort());
+        }
         
         const response = await fetch(`${url}?${params}`, {
             headers: {
@@ -824,7 +829,7 @@ async function generateEnhancedAnswer(
         const topCredibleResults = credibleResults.slice(0, maxSources);
         
         // Step 3: Generate comprehensive answer using PI's LLM
-        const pi = (globalThis as any).pi || piContext?.pi;
+        const pi = piContext?.pi;
         
         if (pi?.complete || pi?.callLLM) {
             processingSteps.push('Generating answer with LLM');
@@ -865,20 +870,24 @@ Please provide a comprehensive answer that:
             let aiAnswer: string;
             
             if (pi?.complete) {
-                const response = await pi.complete({
+                const options: any = {
                     prompt: `${systemPrompt}\n\n${userPrompt}`,
                     maxTokens: 1500,
                     temperature: 0.3, // Lower temperature for more factual responses
                     stopSequences: ['Confidence:']
-                });
+                };
+                if (signal) options.signal = signal;
+                const response = await pi.complete(options);
                 aiAnswer = response;
             } else if (pi?.callLLM) {
-                const response = await pi.callLLM({
+                const options: any = {
                     messages: [
                         { role: 'system', content: systemPrompt },
                         { role: 'user', content: userPrompt }
                     ]
-                });
+                };
+                if (signal) options.signal = signal;
+                const response = await pi.callLLM(options);
                 aiAnswer = typeof response === 'string' ? response : response.content || '';
             } else {
                 throw new Error('No LLM available');
@@ -1064,7 +1073,7 @@ function isUrlSafeForFetching(url: string): boolean {
 }
 
 // Enhanced content extraction with structured output
-async function fetchStructuredContent(url: string, maxLength = 2000, focusPrompt?: string): Promise<{
+async function fetchStructuredContent(url: string, maxLength = 2000, focusPrompt?: string, externalSignal?: AbortSignal): Promise<{
     title: string;
     url: string;
     content: string;
@@ -1095,9 +1104,14 @@ async function fetchStructuredContent(url: string, maxLength = 2000, focusPrompt
             );
         }
         
-        // Use AbortController for timeout
+        // Use AbortController for timeout and external cancellation
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 10000);
+        
+        // Link external signal to our controller
+        if (externalSignal) {
+          externalSignal.addEventListener('abort', () => controller.abort());
+        }
         
         const response = await fetch(url, {
             headers: {
@@ -1355,21 +1369,36 @@ async function fetchUrlContent(url: string, maxLength = 2000, prompt?: string) {
 }
 
 // Main search function
-async function unifiedSearch(params: {
+async function unifiedSearch(
+  params: {
     query: string;
     mode?: 'auto' | 'traditional' | 'ai' | 'research';
     maxResults?: number;
     depth?: 'fast' | 'standard' | 'deep';
     safeMode?: boolean;
-}, piContext: any) {
-    const startTime = Date.now();
-    const {
-        query,
-        mode = 'auto',
-        maxResults = 10,
-        depth = 'standard',
-        safeMode = true
-    } = params;
+  },
+  signal?: AbortSignal,
+  piContext: any
+) {
+  const startTime = Date.now();
+  
+  // Check signal at startup
+  if (signal?.aborted) {
+    return {
+      success: false,
+      query: params.query,
+      error: createError(SearchErrorCode.OPERATION_ABORTED, 'Operation aborted by user', {}, false),
+      processing_time_ms: Date.now() - startTime
+    };
+  }
+  
+  const {
+    query,
+    mode = 'auto',
+    maxResults = 10,
+    depth = 'standard',
+    safeMode = true
+  } = params;
     
     // Check rate limit
     if (!checkRateLimit()) {
@@ -1435,7 +1464,7 @@ async function unifiedSearch(params: {
         let allSearchResults: any[] = [];
         
         // Search with original query first
-        const primaryResults = await performSearxngSearch(searchQuery, 'general', maxResults);
+        const primaryResults = await performSearxngSearch(searchQuery, 'general', maxResults, signal);
         allSearchResults.push(...primaryResults);
         
         // If we need more results or want broader coverage, try expanded queries
@@ -1443,7 +1472,7 @@ async function unifiedSearch(params: {
             // Use first expanded query for additional results
             if (queryAnalysis.expanded.length > 1) {
                 const expandedQuery = queryAnalysis.expanded[1];
-                const expandedResults = await performSearxngSearch(expandedQuery, 'general', Math.floor(maxResults / 2));
+                const expandedResults = await performSearxngSearch(expandedQuery, 'general', Math.floor(maxResults / 2), signal);
                 
                 // Merge results, avoiding duplicates by URL
                 const existingUrls = new Set(allSearchResults.map(r => r.url));
@@ -1499,7 +1528,7 @@ async function unifiedSearch(params: {
                 const topResult = searchResults[0];
                 
                 // Use structured content extraction
-                structuredContent = await fetchStructuredContent(topResult.url, 1500);
+                structuredContent = await fetchStructuredContent(topResult.url, 1500, undefined, signal);
                 
                 // Convert to compatible format
                 deepContent = {
@@ -1645,7 +1674,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
             }))
         }),
         execute: async (toolCallId: string, params: any, signal: any, onUpdate: any, ctx: any) => {
-            const result = await unifiedSearch(params, ctx);
+            const result = await unifiedSearch(params, signal, ctx);
             
             // Format the response for PI
             let text = '';
@@ -1806,7 +1835,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
                 const content = await fetchStructuredContent(
                     params.url, 
                     maxLengthValue,
-                    params.prompt
+                    params.prompt,
+                    signal
                 );
                 
                 let text = `## 📄 Enhanced Content Extraction\n\n`;

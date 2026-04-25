@@ -456,8 +456,8 @@ async function executeGitCommand(
       stdout: err.stdout?.trim() || '',
       stderr: err.stderr?.trim() || '',
       exitCode: (err.exitCode || err.code) ? Number(err.exitCode || err.code) : undefined,
-      signal: (err as any).signal,
-      killed: (err as any).killed
+      signal: err.signal,
+      killed: err.killed
     };
   }
 };

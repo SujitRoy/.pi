@@ -293,6 +293,7 @@ function pickWord(): string {
 }
 
 export default function (pi: ExtensionAPI) {
+  try {
 	let enabled = true; // Auto-enable by default
 	let rotationInterval: ReturnType<typeof setInterval> | null = null;
 	let currentAgentActive = false;
@@ -366,4 +367,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		stopRotation();
 	});
+  } catch (error) {
+    console.error('[funny-working-message] Extension failed to load:', error);
+  }
 }

@@ -105,6 +105,12 @@ let currentTheme: Theme | null = null;
 // Footer data reference (set by footer factory)
 let currentFooterData: ReadonlyFooterDataProvider | null = null;
 
+// TUI reference (for triggering re-renders)
+interface TUIWithRequestRender {
+  requestRender(): void;
+}
+let currentTUI: TUIWithRequestRender | null = null;
+
 // API reference (set by extension entry point, used for getThinkingLevel)
 let currentAPI: ExtensionAPI | null = null;
 
@@ -453,25 +459,22 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   function setupFooter(ctx: ExtensionContext) {
     currentAPI = pi;
     refreshState(ctx);
-    (ctx.ui as any).setFooter(
-      (_tui: unknown, theme: Theme, footerData: ReadonlyFooterDataProvider) => {
+    ctx.ui.setFooter(
+      (tui, theme: Theme, footerData: ReadonlyFooterDataProvider) => {
+        currentTUI = tui as TUIWithRequestRender;
         currentTheme = theme;
         currentFooterData = footerData;
         return createFooterComponent();
       },
     );
 
-    // Add keyboard handler for Shift+Tab to cycle thinking levels
-    if ((ctx.ui as any).onInput) {
-      (ctx.ui as any).onInput((key: string) => {
-        // Handle Shift+Tab to cycle through thinking levels
-        if (key === "shift+tab") {
-          cycleThinkingLevel(ctx);
-          return true; // Indicate that we handled the key
-        }
-        return false;
-      });
-    }
+    // Register keyboard shortcut for cycling thinking levels
+    pi.registerShortcut("shift+tab", {
+      description: "Cycle thinking level",
+      handler: async (_ctx) => {
+        cycleThinkingLevel(ctx);
+      },
+    });
   }
 
   /**
@@ -490,15 +493,13 @@ export default async function (pi: ExtensionAPI): Promise<void> {
     try {
       currentAPI.setThinkingLevel(newLevel);
       
-      // Update the state and refresh the display
+      // Update the state and request a re-render
       state.thinkingLevel = newLevel;
-      if ((ctx.ui as any).refreshFooter) {
-        (ctx.ui as any).refreshFooter();
+      if (currentTUI) {
+        currentTUI.requestRender();
       } else {
-        // Fallback to triggering a refresh event
-        setTimeout(() => {
-          refreshState(ctx);
-        }, 50);
+        // Fallback: refresh state after a short delay (may not trigger immediate re-render)
+        setTimeout(() => refreshState(ctx), 50);
       }
     } catch (error) {
       console.error("Failed to update thinking level:", error);
@@ -509,12 +510,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
    * Restore the built-in footer on shutdown
    */
   function restoreFooter(ctx: ExtensionContext) {
-    if ((ctx.ui as any).onInput) {
-      (ctx.ui as any).onInput(null); // Remove the input handler
-    }
-    (ctx.ui as any).setFooter(undefined);
+    ctx.ui.setFooter(undefined);
     currentTheme = null;
     currentFooterData = null;
+    currentTUI = null;
     currentAPI = null;
   }
 
@@ -548,6 +547,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
   });
 
   pi.on("session_shutdown", async (_event: any, ctx: ExtensionContext) => {
+    if (refreshTimer) {
+      clearTimeout(refreshTimer);
+      refreshTimer = null;
+    }
     restoreFooter(ctx);
   });
 
