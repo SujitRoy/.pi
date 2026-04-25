@@ -268,47 +268,10 @@ interface PrOptions {
   label?: string;
   project?: string;
   milestone?: string;
+  deleteBranch?: boolean;
 }
 
-interface PrResult {
-  success: boolean;
-  error?: string;
-  prUrl?: string;
-  prNumber?: number;
-  remote?: string;
-  head?: string;
-  base?: string;
-  summary: string;
-}
 
-interface PrOptions {
-  draft?: boolean;
-  reviewer?: string;
-  assignee?: string;
-  label?: string;
-  project?: string;
-  milestone?: string;
-}
-
-interface PrResult {
-  success: boolean;
-  error?: string;
-  prUrl?: string;
-  prNumber?: number;
-  remote?: string;
-  head?: string;
-  base?: string;
-  summary: string;
-}
-
-interface PrOptions {
-  draft?: boolean;
-  reviewer?: string;
-  assignee?: string;
-  label?: string;
-  project?: string;
-  milestone?: string;
-}
 
 // Extend execFileAsync result type
 interface ExecFileResult {
@@ -1645,6 +1608,42 @@ async function gitPr(
   const prUrl = prMatch ? prMatch[1] : undefined;
   const prNumber = prNumberMatch ? parseInt(prNumberMatch[1]) : undefined;
 
+  const resultSummary = `Pull request created successfully!\n\nBranch: ${currentBranch}\nTarget: ${base || 'main'}\n${prUrl ? `URL: ${prUrl}` : ''}`;
+
+  // If deleteBranch option is set, delete the branch after PR creation
+  if (options.deleteBranch) {
+    try {
+      // Switch to base branch (or main) to avoid being on the branch to delete
+      const targetBase = base || 'main';
+      // Try to checkout base branch
+      try {
+        await executeGitCommand(workingDir, ['checkout', targetBase]);
+      } catch (checkoutErr) {
+        // Ignore checkout errors, maybe base doesn't exist locally; try master
+        try {
+          await executeGitCommand(workingDir, ['checkout', 'master']);
+        } catch (e) {
+          // Can't switch, will skip local deletion
+        }
+      }
+
+      // Delete remote branch
+      await executeGitCommand(workingDir, ['push', 'origin', '--delete', currentBranch]);
+
+      // Delete local branch (force)
+      try {
+        await executeGitCommand(workingDir, ['branch', '-D', currentBranch]);
+      } catch (e) {
+        // Local deletion might fail if branch is current or doesn't exist; ignore
+      }
+
+      resultSummary += `\n\nBranch cleanup completed: deleted remote branch and local branch.`;
+    } catch (branchErr) {
+      // Don't fail PR creation if cleanup fails
+      resultSummary += `\n\nWarning: branch cleanup failed: ${(branchErr as Error).message}`;
+    }
+  }
+
   return {
     success: true,
     prUrl,
@@ -1652,7 +1651,7 @@ async function gitPr(
     remote: 'origin',
     head: currentBranch,
     base: base || 'main',
-    summary: `Pull request created successfully!\n\nBranch: ${currentBranch}\nTarget: ${base || 'main'}\n${prUrl ? `URL: ${prUrl}` : ''}`
+    summary: resultSummary
   };
 }
 
@@ -2582,6 +2581,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       label: Type.Optional(Type.String({ description: 'Add labels (comma-separated for multiple)' })),
       project: Type.Optional(Type.String({ description: 'Add to project' })),
       milestone: Type.Optional(Type.String({ description: 'Add to milestone' })),
+      deleteBranch: Type.Optional(Type.Boolean({ description: 'Delete branch after PR creation (remote and local)' })),
       cwd: Type.Optional(Type.String({ description: 'Working directory' }))
     }),
     execute: async (
@@ -2596,6 +2596,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         label?: string;
         project?: string;
         milestone?: string;
+        deleteBranch?: boolean;
         cwd?: string;
       },
       signal: AbortSignal | undefined,
@@ -2614,7 +2615,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
             assignee: params?.assignee,
             label: params?.label,
             project: params?.project,
-            milestone: params?.milestone
+            milestone: params?.milestone,
+            deleteBranch: params?.deleteBranch || false
           }
         );
 
