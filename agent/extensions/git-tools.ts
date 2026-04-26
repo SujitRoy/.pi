@@ -268,6 +268,7 @@ interface PrOptions {
   label?: string;
   project?: string;
   milestone?: string;
+  fill?: boolean;
   deleteBranch?: boolean;
   autoPush?: boolean;
 }
@@ -1530,13 +1531,19 @@ async function gitPr(
   const shouldAutoPush = options.autoPush !== false;
 
   if (shouldAutoPush) {
-    // Step 3: Check if branch is ahead of remote (has commits to push)
-    const fetchResult = await executeGitCommand(workingDir, ['fetch', 'origin', currentBranch]);
-    // fetch might fail if branch doesn't exist on remote yet (that's OK)
+    // Step 3: Check if branch exists on remote
+    const remoteBranchCheck = await executeGitCommand(workingDir, ['ls-remote', '--heads', 'origin', currentBranch]);
+    const remoteExists = remoteBranchCheck.success && remoteBranchCheck.stdout.trim() !== '';
 
-    // Check if there are local commits not on remote
-    const aheadResult = await executeGitCommand(workingDir, ['rev-list', '--count', `origin/${currentBranch}..HEAD`]);
-    const hasUnpushedCommits = aheadResult.success && parseInt(aheadResult.stdout.trim()) > 0;
+    let hasUnpushedCommits = false;
+    if (remoteExists) {
+      // Check if there are local commits not on remote
+      const aheadResult = await executeGitCommand(workingDir, ['rev-list', '--count', `origin/${currentBranch}..HEAD`]);
+      hasUnpushedCommits = aheadResult.success && parseInt(aheadResult.stdout.trim()) > 0;
+    } else {
+      // Branch doesn't exist on remote, so it definitely has unpushed commits
+      hasUnpushedCommits = true;
+    }
 
     // Step 4: Push branch if it has unpushed commits
     if (hasUnpushedCommits) {
@@ -1572,6 +1579,9 @@ async function gitPr(
   }
 
   // Add options
+  if (options.fill) {
+    args.push('--fill');
+  }
   if (options.draft) {
     args.push('--draft');
   }
@@ -1614,16 +1624,6 @@ async function gitPr(
     };
   }
 
-  if (!result.success) {
-    return {
-      success: false,
-      error: result.stderr || result.error || 'Unknown error creating PR',
-      head: currentBranch,
-      base: base || 'main',
-      summary: ''
-    };
-  }
-
   // Parse output to extract PR number and URL
   // gh pr create typically outputs: "https://github.com/owner/repo/pull/123"
   const output = result.stdout.trim();
@@ -1638,31 +1638,42 @@ async function gitPr(
   // If deleteBranch option is set, delete the branch after PR creation
   if (options.deleteBranch) {
     try {
-      // Switch to base branch (or main) to avoid being on the branch to delete
-      const targetBase = base || 'main';
-      // Try to checkout base branch
-      try {
-        await executeGitCommand(workingDir, ['checkout', targetBase]);
-      } catch (checkoutErr) {
-        // Ignore checkout errors, maybe base doesn't exist locally; try master
-        try {
-          await executeGitCommand(workingDir, ['checkout', 'master']);
-        } catch (e) {
-          // Can't switch, will skip local deletion
+      // Determine which branch to switch back to
+      // 1. Explicit base branch
+      // 2. Default branch from git config
+      // 3. Fallback to main or master
+      let targetBase = base;
+      
+      if (!targetBase) {
+        const defaultBranchResult = await executeGitCommand(workingDir, ['config', '--get', 'init.defaultBranch']);
+        if (defaultBranchResult.success && defaultBranchResult.stdout.trim()) {
+          targetBase = defaultBranchResult.stdout.trim();
+        } else {
+          // Check what exists
+          const checkMain = await executeGitCommand(workingDir, ['rev-parse', '--verify', 'main']);
+          if (checkMain.success) {
+            targetBase = 'main';
+          } else {
+            targetBase = 'master';
+          }
         }
       }
 
-      // Delete remote branch
-      await executeGitCommand(workingDir, ['push', 'origin', '--delete', currentBranch]);
-
-      // Delete local branch (force)
-      try {
-        await executeGitCommand(workingDir, ['branch', '-D', currentBranch]);
-      } catch (e) {
-        // Local deletion might fail if branch is current or doesn't exist; ignore
+      // Try to checkout target base branch
+      const checkoutResult = await executeGitCommand(workingDir, ['checkout', targetBase]);
+      
+      if (checkoutResult.success) {
+        // Delete local branch (force)
+        const deleteResult = await executeGitCommand(workingDir, ['branch', '-D', currentBranch]);
+        if (deleteResult.success) {
+          resultSummary += `\n\nBranch cleanup: switched to \`${targetBase}\` and deleted local branch \`${currentBranch}\`.`;
+          resultSummary += `\nNote: Remote branch was NOT deleted to keep the PR open. Enable "Automatically delete head branches" in GitHub repository settings for automatic remote cleanup after merge.`;
+        } else {
+          resultSummary += `\n\nWarning: switched to \`${targetBase}\` but failed to delete local branch \`${currentBranch}\`: ${deleteResult.error}`;
+        }
+      } else {
+        resultSummary += `\n\nWarning: could not switch to \`${targetBase}\`, skipping local branch deletion.`;
       }
-
-      resultSummary += `\n\nBranch cleanup completed: deleted remote branch and local branch.`;
     } catch (branchErr) {
       // Don't fail PR creation if cleanup fails
       resultSummary += `\n\nWarning: branch cleanup failed: ${(branchErr as Error).message}`;
@@ -2600,13 +2611,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
       base: Type.Optional(Type.String({ description: 'Target branch (default: main)' })),
       title: Type.Optional(Type.String({ description: 'PR title (default: first commit message or "New PR")' })),
       body: Type.Optional(Type.String({ description: 'PR description (default: commit messages)' })),
+      fill: Type.Optional(Type.Boolean({ description: 'Automatically populate title and body from commit messages (default: false)' })),
       draft: Type.Optional(Type.Boolean({ description: 'Create as draft PR' })),
       reviewer: Type.Optional(Type.String({ description: 'Request reviewers (comma-separated for multiple)' })),
       assignee: Type.Optional(Type.String({ description: 'Assign PR to user' })),
       label: Type.Optional(Type.String({ description: 'Add labels (comma-separated for multiple)' })),
       project: Type.Optional(Type.String({ description: 'Add to project' })),
       milestone: Type.Optional(Type.String({ description: 'Add to milestone' })),
-      deleteBranch: Type.Optional(Type.Boolean({ description: 'Delete branch after PR creation (remote and local)' })),
+      deleteBranch: Type.Optional(Type.Boolean({ description: 'Delete local branch after PR creation. Note: Remote branch is preserved to keep the PR open.' })),
       autoPush: Type.Optional(Type.Boolean({ description: 'Automatically push branch before creating PR (default: true). Set to false to require branch already on remote.' })),
       cwd: Type.Optional(Type.String({ description: 'Working directory' }))
     }),
@@ -2616,6 +2628,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         base?: string;
         title?: string;
         body?: string;
+        fill?: boolean;
         draft?: boolean;
         reviewer?: string;
         assignee?: string;
@@ -2637,6 +2650,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
           params?.title,
           params?.body,
           {
+            fill: params?.fill || false,
             draft: params?.draft || false,
             reviewer: params?.reviewer,
             assignee: params?.assignee,
