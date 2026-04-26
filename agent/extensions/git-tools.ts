@@ -261,6 +261,21 @@ interface PrResult {
   summary: string;
 }
 
+interface PrMergeResult {
+  success: boolean;
+  error?: string;
+  method?: string;
+  summary: string;
+}
+
+interface PrCleanupResult {
+  success: boolean;
+  error?: string;
+  deletedLocal: string[];
+  deletedRemote: string[];
+  summary: string;
+}
+
 interface PrOptions {
   draft?: boolean;
   reviewer?: string;
@@ -1691,6 +1706,133 @@ async function gitPr(
   };
 }
 
+/**
+ * Merge a pull request using GitHub CLI (gh)
+ */
+async function gitPrMerge(
+  cwd?: string,
+  prIdentifier?: string,
+  method: 'merge' | 'squash' | 'rebase' = 'merge',
+  deleteBranch: boolean = true
+): Promise<PrMergeResult> {
+  const workingDir = validateCwd(cwd);
+
+  const args: string[] = ['pr', 'merge'];
+
+  if (prIdentifier) {
+    args.push(prIdentifier);
+  }
+
+  // Set merge method
+  if (method === 'squash') {
+    args.push('--squash');
+  } else if (method === 'rebase') {
+    args.push('--rebase');
+  } else {
+    args.push('--merge');
+  }
+
+  // Add delete branch flag
+  if (deleteBranch) {
+    args.push('--delete-branch');
+  }
+
+  // Non-interactive
+  args.push('--admin'); // Optional, but helps if checks are pending and we are admin
+
+  let result: { stdout: string; stderr: string };
+  try {
+    result = await execFileAsync('gh', args, {
+      cwd: workingDir,
+      timeout: 60000,
+      maxBuffer: 10 * 1024 * 1024,
+      encoding: 'utf8',
+      env: { ...process.env }
+    });
+  } catch (error) {
+    const err = error as ExecFileException & { exitCode?: number; stdout?: string; stderr?: string };
+    return {
+      success: false,
+      error: err.message || err.stderr || 'Failed to merge PR',
+      method,
+      summary: err.stdout || ''
+    };
+  }
+
+  return {
+    success: true,
+    method,
+    summary: result.stdout.trim() || 'Pull request merged successfully.'
+  };
+}
+
+/**
+ * Clean up merged branches (local and remote)
+ */
+async function gitPrCleanup(cwd?: string, dryRun: boolean = false): Promise<PrCleanupResult> {
+  const workingDir = validateCwd(cwd);
+
+  // 1. Get the default branch
+  let defaultBranch = 'main';
+  const defaultBranchResult = await executeGitCommand(workingDir, ['config', '--get', 'init.defaultBranch']);
+  if (defaultBranchResult.success && defaultBranchResult.stdout.trim()) {
+    defaultBranch = defaultBranchResult.stdout.trim();
+  } else {
+    const checkMain = await executeGitCommand(workingDir, ['rev-parse', '--verify', 'main']);
+    if (!checkMain.success) {
+      defaultBranch = 'master';
+    }
+  }
+
+  // 2. Fetch origin and prune
+  await executeGitCommand(workingDir, ['fetch', 'origin', '--prune']);
+
+  // 3. Find local branches merged into default branch
+  const mergedLocalResult = await executeGitCommand(workingDir, ['branch', '--merged', defaultBranch]);
+  const localBranches = mergedLocalResult.success 
+    ? mergedLocalResult.stdout.split('\n')
+        .map(b => b.replace('*', '').trim())
+        .filter(b => b && b !== defaultBranch && b !== 'master' && b !== 'main')
+    : [];
+
+  // 4. Find remote branches merged into origin/default branch
+  const mergedRemoteResult = await executeGitCommand(workingDir, ['branch', '-r', '--merged', `origin/${defaultBranch}`]);
+  const remoteBranches = mergedRemoteResult.success
+    ? mergedRemoteResult.stdout.split('\n')
+        .map(b => b.trim())
+        .filter(b => b && b.startsWith('origin/') && !b.includes('->') && !b.endsWith(`/${defaultBranch}`) && !b.endsWith('/master') && !b.endsWith('/main'))
+        .map(b => b.replace('origin/', ''))
+    : [];
+
+  const deletedLocal: string[] = [];
+  const deletedRemote: string[] = [];
+
+  if (!dryRun) {
+    // Delete local branches
+    for (const branch of localBranches) {
+      const del = await executeGitCommand(workingDir, ['branch', '-d', branch]);
+      if (del.success) deletedLocal.push(branch);
+    }
+
+    // Delete remote branches
+    for (const branch of remoteBranches) {
+      const del = await executeGitCommand(workingDir, ['push', 'origin', '--delete', branch]);
+      if (del.success) deletedRemote.push(branch);
+    }
+  }
+
+  const summary = dryRun 
+    ? `**Dry Run Results:**\nWould delete local: ${localBranches.join(', ') || 'none'}\nWould delete remote: ${remoteBranches.join(', ') || 'none'}`
+    : `**Cleanup Completed:**\nDeleted local: ${deletedLocal.join(', ') || 'none'}\nDeleted remote: ${deletedRemote.join(', ') || 'none'}`;
+
+  return {
+    success: true,
+    deletedLocal: dryRun ? localBranches : deletedLocal,
+    deletedRemote: dryRun ? remoteBranches : deletedRemote,
+    summary
+  };
+}
+
 // ============================================================================
 // Formatting Helpers
 // ============================================================================
@@ -2676,6 +2818,97 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         const err = error as Error;
         return {
           content: [{ type: 'text', text: `**Git PR Failed**\n\n${err.message}` }],
+          details: {},
+          isError: true
+        };
+      }
+    }
+  });
+
+  // Register git_pr_merge tool
+  pi.registerTool({
+    name: 'git_pr_merge',
+    label: 'Git PR Merge',
+    description: 'Merge a pull request using GitHub CLI (gh). Automatically deletes the local and remote branch after merge by default.',
+    parameters: Type.Object({
+      prIdentifier: Type.Optional(Type.String({ description: 'PR number, URL, or branch name (defaults to current branch)' })),
+      method: Type.Optional(Type.String({ description: 'Merge method: merge, squash, rebase (default: merge)', enum: ['merge', 'squash', 'rebase'] })),
+      deleteBranch: Type.Optional(Type.Boolean({ description: 'Delete the local and remote branch after merge (default: true)' })),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: {
+        prIdentifier?: string;
+        method?: 'merge' | 'squash' | 'rebase';
+        deleteBranch?: boolean;
+        cwd?: string;
+      },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
+      try {
+        const result = await gitPrMerge(
+          params?.cwd,
+          params?.prIdentifier,
+          params?.method || 'merge',
+          params?.deleteBranch !== false
+        );
+
+        if (!result.success) {
+          return {
+            content: [{ type: 'text', text: `**Git PR Merge Failed**\n\n${result.error}\n\n${result.summary}` }],
+            details: {},
+            isError: true
+          };
+        }
+
+        const text = `**Pull Request Merged**\n\nMethod: \`${result.method}\`\n\n${result.summary}`;
+        return { content: [{ type: 'text', text }], details: {} };
+      } catch (error) {
+        const err = error as Error;
+        return {
+          content: [{ type: 'text', text: `**Git PR Merge Failed**\n\n${err.message}` }],
+          details: {},
+          isError: true
+        };
+      }
+    }
+  });
+
+  // Register git_pr_cleanup tool
+  pi.registerTool({
+    name: 'git_pr_cleanup',
+    label: 'Git PR Cleanup',
+    description: 'Clean up stale local and remote branches that have already been merged into the default branch.',
+    parameters: Type.Object({
+      dryRun: Type.Optional(Type.Boolean({ description: 'Show what would be deleted without actually deleting (default: false)' })),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: { dryRun?: boolean; cwd?: string },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
+      try {
+        const result = await gitPrCleanup(params?.cwd, params?.dryRun || false);
+
+        if (!result.success) {
+          return {
+            content: [{ type: 'text', text: `**Git PR Cleanup Failed**\n\n${result.error}` }],
+            details: {},
+            isError: true
+          };
+        }
+
+        return { content: [{ type: 'text', text: result.summary }], details: {} };
+      } catch (error) {
+        const err = error as Error;
+        return {
+          content: [{ type: 'text', text: `**Git PR Cleanup Failed**\n\n${err.message}` }],
           details: {},
           isError: true
         };
