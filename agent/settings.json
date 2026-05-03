@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.67.68",
+  "lastChangelogVersion": "0.72.1",
   "defaultProvider": "agentrouter",
   "defaultModel": "deepseek-v3.2",
   "defaultThinkingLevel": "high",
