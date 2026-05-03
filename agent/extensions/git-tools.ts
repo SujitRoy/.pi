@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 /**
  * PI Agent Extension: Git Tools (Enhanced & Secured)
  *
@@ -44,6 +42,7 @@ import * as os from 'os';
 import * as fs from 'fs';
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
 import { Type } from '@sinclair/typebox';
+import { StringEnum } from '@mariozechner/pi-ai';
 
 const execFileAsync = promisify(execFile);
 
@@ -251,6 +250,39 @@ interface ShowOptions {
   nameOnly?: boolean;
 }
 
+interface PrResult {
+  success: boolean;
+  error?: string;
+  prUrl?: string;
+  prNumber?: number;
+  remote?: string;
+  head?: string;
+  base?: string;
+  summary: string;
+}
+
+interface PrCleanupResult {
+  success: boolean;
+  error?: string;
+  deletedLocal: string[];
+  deletedRemote: string[];
+  summary: string;
+}
+
+interface PrOptions {
+  draft?: boolean;
+  reviewer?: string;
+  assignee?: string;
+  label?: string;
+  project?: string;
+  milestone?: string;
+  fill?: boolean;
+  deleteBranch?: boolean;
+  autoPush?: boolean;
+}
+
+
+
 // Extend execFileAsync result type
 interface ExecFileResult {
   stdout: string;
@@ -323,8 +355,7 @@ function validateCwd(cwd?: string): string {
  */
 async function validateGitRepo(workingDir: string): Promise<boolean> {
   // Check manually for .git directory to avoid git command output
-  import * as fs from 'fs';
-  import * as path from 'path';
+  // (fs and path are already imported at top level)
   
   function checkGitDir(dir: string): boolean {
     const gitDir = path.join(dir, '.git');
@@ -458,8 +489,8 @@ async function executeGitCommand(
       stdout: err.stdout?.trim() || '',
       stderr: err.stderr?.trim() || '',
       exitCode: (err.exitCode || err.code) ? Number(err.exitCode || err.code) : undefined,
-      signal: (err as any).signal,
-      killed: (err as any).killed
+      signal: err.signal,
+      killed: err.killed
     };
   }
 };
@@ -1468,6 +1499,274 @@ async function gitShow(commit: string, cwd?: string, options: ShowOptions = {}):
 }
 
 // ============================================================================
+// PR Creation (GitHub CLI)
+// ============================================================================
+
+/**
+ * Create a pull request using GitHub CLI (gh)
+ * This follows modern PR best practices and enforces repository PR templates
+ */
+async function gitPr(
+  cwd?: string,
+  base?: string,
+  title?: string,
+  body?: string,
+  options: PrOptions = {}
+): Promise<PrResult> {
+  const workingDir = validateCwd(cwd);
+
+  // Step 1: Validate it's a git repository
+  await validateGitRepo(workingDir);
+
+  // Step 2: Get current branch name
+  const branchResult = await executeGitCommand(workingDir, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (!branchResult.success) {
+    return {
+      success: false,
+      error: `Failed to get current branch: ${branchResult.error}`,
+      summary: ''
+    };
+  }
+  const currentBranch = branchResult.stdout.trim();
+  if (!currentBranch || currentBranch === 'HEAD') {
+    return {
+      success: false,
+      error: 'Not on a valid branch (detached HEAD?)',
+      summary: ''
+    };
+  }
+
+  const shouldAutoPush = options.autoPush !== false;
+
+  if (shouldAutoPush) {
+    // Step 3: Check if branch exists on remote
+    const remoteBranchCheck = await executeGitCommand(workingDir, ['ls-remote', '--heads', 'origin', currentBranch]);
+    const remoteExists = remoteBranchCheck.success && remoteBranchCheck.stdout.trim() !== '';
+
+    let hasUnpushedCommits = false;
+    if (remoteExists) {
+      // Check if there are local commits not on remote
+      const aheadResult = await executeGitCommand(workingDir, ['rev-list', '--count', `origin/${currentBranch}..HEAD`]);
+      hasUnpushedCommits = aheadResult.success && parseInt(aheadResult.stdout.trim()) > 0;
+    } else {
+      // Branch doesn't exist on remote, so it definitely has unpushed commits
+      hasUnpushedCommits = true;
+    }
+
+    // Step 4: Push branch if it has unpushed commits
+    if (hasUnpushedCommits) {
+      const pushResult = await gitPush('origin', currentBranch, workingDir, false);
+      if (!pushResult.success) {
+        return {
+          success: false,
+          error: `Failed to push branch to remote: ${pushResult.error}`,
+          head: currentBranch,
+          base: base || 'main',
+          summary: ''
+        };
+      }
+    }
+  }
+
+  // Step 5: Build gh pr create command
+  const args: string[] = ['pr', 'create'];
+
+  // Add base branch if specified
+  if (base) {
+    args.push('--base', base);
+  }
+
+  // Add title if provided
+  if (title) {
+    args.push('--title', title);
+  }
+
+  // Add body if provided
+  if (body) {
+    args.push('--body', body);
+  }
+
+  // Add options
+  if (options.fill) {
+    args.push('--fill');
+  }
+  if (options.draft) {
+    args.push('--draft');
+  }
+  if (options.reviewer) {
+    args.push('--reviewer', options.reviewer);
+  }
+  if (options.assignee) {
+    args.push('--assignee', options.assignee);
+  }
+  if (options.label) {
+    args.push('--label', options.label);
+  }
+  if (options.project) {
+    args.push('--project', options.project);
+  }
+  if (options.milestone) {
+    args.push('--milestone', options.milestone);
+  }
+
+  // Execute gh command using GitHub CLI (branch push is controlled by autoPush option above)
+  let result: { stdout: string; stderr: string };
+  try {
+    result = await execFileAsync('gh', args, {
+      cwd: workingDir,
+      timeout: 60000,
+      maxBuffer: 10 * 1024 * 1024,
+      encoding: 'utf8',
+      env: { ...process.env }
+    });
+  } catch (error) {
+    const err = error as ExecFileException & { exitCode?: number; stdout?: string; stderr?: string };
+    return {
+      success: false,
+      error: err.message,
+      stdout: err.stdout?.trim() || '',
+      stderr: err.stderr?.trim() || '',
+      exitCode: err.exitCode || err.code ? Number(err.exitCode || err.code) : undefined,
+      signal: err.signal,
+      killed: err.killed
+    };
+  }
+
+  // Parse output to extract PR number and URL
+  // gh pr create typically outputs: "https://github.com/owner/repo/pull/123"
+  const output = result.stdout.trim();
+  const prMatch = output.match(/(https?:\/\/github\.com[^\s]+\/pull\/\d+)/);
+  const prNumberMatch = output.match(/\/pull\/(\d+)/);
+
+  const prUrl = prMatch ? prMatch[1] : undefined;
+  const prNumber = prNumberMatch ? parseInt(prNumberMatch[1]) : undefined;
+
+  let resultSummary = `Pull request created successfully!\n\nBranch: ${currentBranch}\nTarget: ${base || 'main'}\n${prUrl ? `URL: ${prUrl}` : ''}`;
+
+  // If deleteBranch option is set, delete the branch after PR creation
+  if (options.deleteBranch) {
+    try {
+      // Determine which branch to switch back to
+      // 1. Explicit base branch
+      // 2. Default branch from git config
+      // 3. Fallback to main or master
+      let targetBase = base;
+      
+      if (!targetBase) {
+        const defaultBranchResult = await executeGitCommand(workingDir, ['config', '--get', 'init.defaultBranch']);
+        if (defaultBranchResult.success && defaultBranchResult.stdout.trim()) {
+          targetBase = defaultBranchResult.stdout.trim();
+        } else {
+          // Check what exists
+          const checkMain = await executeGitCommand(workingDir, ['rev-parse', '--verify', 'main']);
+          if (checkMain.success) {
+            targetBase = 'main';
+          } else {
+            targetBase = 'master';
+          }
+        }
+      }
+
+      // Try to checkout target base branch
+      const checkoutResult = await executeGitCommand(workingDir, ['checkout', targetBase]);
+      
+      if (checkoutResult.success) {
+        // Delete local branch (force)
+        const deleteResult = await executeGitCommand(workingDir, ['branch', '-D', currentBranch]);
+        if (deleteResult.success) {
+          resultSummary += `\n\nBranch cleanup: switched to \`${targetBase}\` and deleted local branch \`${currentBranch}\`.`;
+          resultSummary += `\nNote: Remote branch was NOT deleted to keep the PR open. Enable "Automatically delete head branches" in GitHub repository settings for automatic remote cleanup after merge.`;
+        } else {
+          resultSummary += `\n\nWarning: switched to \`${targetBase}\` but failed to delete local branch \`${currentBranch}\`: ${deleteResult.error}`;
+        }
+      } else {
+        resultSummary += `\n\nWarning: could not switch to \`${targetBase}\`, skipping local branch deletion.`;
+      }
+    } catch (branchErr) {
+      // Don't fail PR creation if cleanup fails
+      resultSummary += `\n\nWarning: branch cleanup failed: ${(branchErr as Error).message}`;
+    }
+  }
+
+  return {
+    success: true,
+    prUrl,
+    prNumber,
+    remote: 'origin',
+    head: currentBranch,
+    base: base || 'main',
+    summary: resultSummary
+  };
+}
+
+/**
+ * Clean up merged branches (local and remote)
+ */
+async function gitPrCleanup(cwd?: string, dryRun: boolean = false): Promise<PrCleanupResult> {
+  const workingDir = validateCwd(cwd);
+
+  // 1. Get the default branch
+  let defaultBranch = 'main';
+  const defaultBranchResult = await executeGitCommand(workingDir, ['config', '--get', 'init.defaultBranch']);
+  if (defaultBranchResult.success && defaultBranchResult.stdout.trim()) {
+    defaultBranch = defaultBranchResult.stdout.trim();
+  } else {
+    const checkMain = await executeGitCommand(workingDir, ['rev-parse', '--verify', 'main']);
+    if (!checkMain.success) {
+      defaultBranch = 'master';
+    }
+  }
+
+  // 2. Fetch origin and prune
+  await executeGitCommand(workingDir, ['fetch', 'origin', '--prune']);
+
+  // 3. Find local branches merged into default branch
+  const mergedLocalResult = await executeGitCommand(workingDir, ['branch', '--merged', defaultBranch]);
+  const localBranches = mergedLocalResult.success 
+    ? mergedLocalResult.stdout.split('\n')
+        .map(b => b.replace('*', '').trim())
+        .filter(b => b && b !== defaultBranch && b !== 'master' && b !== 'main')
+    : [];
+
+  // 4. Find remote branches merged into origin/default branch
+  const mergedRemoteResult = await executeGitCommand(workingDir, ['branch', '-r', '--merged', `origin/${defaultBranch}`]);
+  const remoteBranches = mergedRemoteResult.success
+    ? mergedRemoteResult.stdout.split('\n')
+        .map(b => b.trim())
+        .filter(b => b && b.startsWith('origin/') && !b.includes('->') && !b.endsWith(`/${defaultBranch}`) && !b.endsWith('/master') && !b.endsWith('/main'))
+        .map(b => b.replace('origin/', ''))
+    : [];
+
+  const deletedLocal: string[] = [];
+  const deletedRemote: string[] = [];
+
+  if (!dryRun) {
+    // Delete local branches
+    for (const branch of localBranches) {
+      const del = await executeGitCommand(workingDir, ['branch', '-d', branch]);
+      if (del.success) deletedLocal.push(branch);
+    }
+
+    // Delete remote branches
+    for (const branch of remoteBranches) {
+      const del = await executeGitCommand(workingDir, ['push', 'origin', '--delete', branch]);
+      if (del.success) deletedRemote.push(branch);
+    }
+  }
+
+  const summary = dryRun 
+    ? `**Dry Run Results:**\nWould delete local: ${localBranches.join(', ') || 'none'}\nWould delete remote: ${remoteBranches.join(', ') || 'none'}`
+    : `**Cleanup Completed:**\nDeleted local: ${deletedLocal.join(', ') || 'none'}\nDeleted remote: ${deletedRemote.join(', ') || 'none'}`;
+
+  return {
+    success: true,
+    deletedLocal: dryRun ? localBranches : deletedLocal,
+    deletedRemote: dryRun ? remoteBranches : deletedRemote,
+    summary
+  };
+}
+
+// ============================================================================
 // Formatting Helpers
 // ============================================================================
 
@@ -2371,6 +2670,126 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         const err = error as Error;
         return {
           content: [{ type: 'text', text: `**Git Show Failed**\n\n${err.message}` }],
+          details: {},
+          isError: true
+        };
+      }
+    }
+  });
+
+  // Register git_pr tool
+  pi.registerTool({
+    name: 'git_pr',
+    label: 'Git PR',
+    description: 'Create a pull request using GitHub CLI (gh). By default, automatically pushes the branch if needed; set autoPush=false to require the branch to already exist on the remote. Follows repo PR templates.',
+    parameters: Type.Object({
+      base: Type.Optional(Type.String({ description: 'Target branch (default: main)' })),
+      title: Type.Optional(Type.String({ description: 'PR title (default: first commit message or "New PR")' })),
+      body: Type.Optional(Type.String({ description: 'PR description (default: commit messages)' })),
+      fill: Type.Optional(Type.Boolean({ description: 'Automatically populate title and body from commit messages (default: false)' })),
+      draft: Type.Optional(Type.Boolean({ description: 'Create as draft PR' })),
+      reviewer: Type.Optional(Type.String({ description: 'Request reviewers (comma-separated for multiple)' })),
+      assignee: Type.Optional(Type.String({ description: 'Assign PR to user' })),
+      label: Type.Optional(Type.String({ description: 'Add labels (comma-separated for multiple)' })),
+      project: Type.Optional(Type.String({ description: 'Add to project' })),
+      milestone: Type.Optional(Type.String({ description: 'Add to milestone' })),
+      deleteBranch: Type.Optional(Type.Boolean({ description: 'Delete local branch after PR creation. Note: Remote branch is preserved to keep the PR open.' })),
+      autoPush: Type.Optional(Type.Boolean({ description: 'Automatically push branch before creating PR (default: true). Set to false to require branch already on remote.' })),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: {
+        base?: string;
+        title?: string;
+        body?: string;
+        fill?: boolean;
+        draft?: boolean;
+        reviewer?: string;
+        assignee?: string;
+        label?: string;
+        project?: string;
+        milestone?: string;
+        deleteBranch?: boolean;
+        autoPush?: boolean;
+        cwd?: string;
+      },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
+      try {
+        const result = await gitPr(
+          params?.cwd,
+          params?.base,
+          params?.title,
+          params?.body,
+          {
+            fill: params?.fill || false,
+            draft: params?.draft || false,
+            reviewer: params?.reviewer,
+            assignee: params?.assignee,
+            label: params?.label,
+            project: params?.project,
+            milestone: params?.milestone,
+            deleteBranch: params?.deleteBranch || false,
+            autoPush: params?.autoPush
+          }
+        );
+
+        if (!result.success) {
+          return {
+            content: [{ type: 'text', text: `**Git PR Failed**\n\n${result.error}\n\nHead: ${result.head}\nBase: ${result.base}` }],
+            details: {},
+            isError: true
+          };
+        }
+
+        const text = `**Pull Request Created**\n\nBranch: \`${result.head}\` → \`${result.base}\`\n\n${result.summary}`;
+        return { content: [{ type: 'text', text }], details: { prUrl: result.prUrl, prNumber: result.prNumber } };
+      } catch (error) {
+        const err = error as Error;
+        return {
+          content: [{ type: 'text', text: `**Git PR Failed**\n\n${err.message}` }],
+          details: {},
+          isError: true
+        };
+      }
+    }
+  });
+
+  // Register git_pr_cleanup tool
+  pi.registerTool({
+    name: 'git_pr_cleanup',
+    label: 'Git PR Cleanup',
+    description: 'Clean up stale local and remote branches that have already been merged into the default branch.',
+    parameters: Type.Object({
+      dryRun: Type.Optional(Type.Boolean({ description: 'Show what would be deleted without actually deleting (default: false)' })),
+      cwd: Type.Optional(Type.String({ description: 'Working directory' }))
+    }),
+    execute: async (
+      toolCallId: string,
+      params: { dryRun?: boolean; cwd?: string },
+      signal: AbortSignal | undefined,
+      onUpdate: ((update: any) => void) | undefined,
+      ctx: any
+    ): Promise<ToolExecuteResult> => {
+      try {
+        const result = await gitPrCleanup(params?.cwd, params?.dryRun || false);
+
+        if (!result.success) {
+          return {
+            content: [{ type: 'text', text: `**Git PR Cleanup Failed**\n\n${result.error}` }],
+            details: {},
+            isError: true
+          };
+        }
+
+        return { content: [{ type: 'text', text: result.summary }], details: {} };
+      } catch (error) {
+        const err = error as Error;
+        return {
+          content: [{ type: 'text', text: `**Git PR Cleanup Failed**\n\n${err.message}` }],
           details: {},
           isError: true
         };

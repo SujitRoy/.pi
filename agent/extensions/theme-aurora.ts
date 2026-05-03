@@ -99,35 +99,14 @@ const AURORA_THEME = {
   },
 };
 
-export default async function (): Promise<void> {
+export default async function (pi: ExtensionAPI): Promise<void> {
   try {
     const fs = await import("fs");
     const path = await import("path");
     const os = await import("os");
 
-    const defaultDir = path.join(os.homedir(), ".pi", "agent");
-    const homeDir = path.resolve(os.homedir());
-
-    let agentDir: string;
-    if (process.env.PI_AGENT_DIR) {
-      let rawDir = process.env.PI_AGENT_DIR;
-      if (rawDir.startsWith("~/")) {
-        rawDir = path.join(os.homedir(), rawDir.slice(2));
-      }
-      const resolved = path.resolve(rawDir);
-      if (!resolved.startsWith(homeDir)) {
-        console.warn(
-          `[theme-aurora] PI_AGENT_DIR "${rawDir}" is outside home directory, using default`,
-        );
-        agentDir = defaultDir;
-      } else {
-        agentDir = resolved;
-      }
-    } else {
-      agentDir = defaultDir;
-    }
-
-    const themesDir = path.join(agentDir, "themes");
+    // Use standard theme location: ~/.pi/themes/
+    const themesDir = path.join(os.homedir(), ".pi", "themes");
     if (!fs.existsSync(themesDir)) {
       fs.mkdirSync(themesDir, { recursive: true });
     }
@@ -151,6 +130,11 @@ export default async function (): Promise<void> {
     if (needsWrite) {
       fs.writeFileSync(themePath, expected, { encoding: "utf8", mode: 0o644 });
     }
+
+    // Also provide theme via resources_discover for portability
+    pi.on("resources_discover", () => ({
+      themePaths: [themesDir],
+    }));
   } catch {
     // Silently ignore -- theme writing is best-effort
   }
