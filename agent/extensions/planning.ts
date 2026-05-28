@@ -12,7 +12,7 @@
  * - User clarification system
  */
 
-import type { ExtensionAPI, ExtensionCommandContext } from '@mariozechner/pi-coding-agent';
+import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import {
   existsSync, mkdirSync, readFileSync, writeFileSync,
   unlinkSync, readdirSync, statSync, mkdirSync as mkdir

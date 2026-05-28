@@ -6,7 +6,7 @@
  * funny phrases.
  */
 
-import type { ExtensionAPI, ExtensionContext, AgentStartEvent, AgentEndEvent } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, AgentStartEvent, AgentEndEvent } from "@earendil-works/pi-coding-agent";
 
 const DEBUG_FORCE_MESSAGE: string | undefined = undefined;
 

@@ -59,3 +59,4 @@ agent/models.json
 agent/sessions/
 agent/bin/
 agent/cache/
+models.json-copy

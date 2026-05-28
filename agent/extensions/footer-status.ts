@@ -18,7 +18,7 @@ import type {
   ExtensionContext,
   ReadonlyFooterDataProvider,
   Theme,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";

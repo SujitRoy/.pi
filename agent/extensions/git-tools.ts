@@ -40,9 +40,9 @@ import { promisify } from 'util';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
-import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from '@sinclair/typebox';
-import { StringEnum } from '@mariozechner/pi-ai';
+import { StringEnum } from '@earendil-works/pi-ai';
 
 const execFileAsync = promisify(execFile);
 
