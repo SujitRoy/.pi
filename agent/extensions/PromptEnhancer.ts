@@ -1,23 +1,28 @@
 /**
- * Prompt Enhancer Extension - Using 'transform' correctly
- * 
- * Instead of the two-step "hold then send" approach,
- * we use 'transform' to replace the user's text with
- * a meta-instruction that asks the agent to first enhance,
- * then execute.
- * 
- * This is ONE turn, not two. The agent receives:
- * "Enhance the following prompt, then execute the enhanced version: [user's text]"
+ * Prompt Enhancer Extension — Opt-in via /enhance command
+ *
+ * Enhances a user's prompt for clarity before sending it to the agent.
+ * Only triggered explicitly via the /enhance slash command — NEVER automatic.
+ * No input-event listener is registered: every user message is delivered as-is unless
+ * the user explicitly invokes `/enhance <text>`.
+ *
+ * Flow:
+ *   1. User types: /enhance refactor search() to use async/await
+ *   2. Command wraps the text in a meta-instruction (clarify, then execute)
+ *   3. In TUI/RPC: opens an editor so the user can review/edit the enhanced
+ *      prompt and submit it, or press Escape to cancel
+ *   4. In print/JSON mode: sends the enhanced prompt directly
+ *   5. On submit, ctx.sendUserMessage() delivers it to the agent
  */
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
-type EnhancementMode = 'auto' | 'off';
-
-// ── The enhancement wrapper ───────────────────────────────────────────────
-
+/**
+ * Wrap the user's prompt in a meta-instruction that asks the agent to
+ * first rewrite it for clarity, then immediately execute the rewrite.
+ */
 function buildEnhancedPrompt(original: string): string {
-  return `BEFORE EXECUTING ANYTHING ELSE, first rewrite the following user request to be clearer and more specific, then immediately execute that rewritten version.
+    return `BEFORE EXECUTING ANYTHING ELSE, first rewrite the following user request to be clearer and more specific, then immediately execute that rewritten version.
 
 ORIGINAL REQUEST:
 """
@@ -39,89 +44,52 @@ OUTPUT THE ENHANCED PROMPT in this format:
 Then IMMEDIATELY execute the enhanced prompt as your actual task.`;
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-function shouldSkip(text: string): boolean {
-  const trimmed = text.trim();
-  if (trimmed.startsWith('/')) return true;
-  if (trimmed.length < 10) return true;
-  if (/^(yes|no|ok|okay|sure|thanks|thank you|continue|proceed|go ahead|next|done|good|great|nice|perfect|fine|alright|nope|yep|yeah)$/i.test(trimmed)) return true;
-  return false;
-}
-
-// ── Extension ──────────────────────────────────────────────────────────────
-
 export default function (pi: ExtensionAPI) {
-  
-  let mode: EnhancementMode = 'auto';
-  let enhanceCount = 0;
+    // ── /enhance command (opt-in only) ──────────────────────────────────
+    pi.registerCommand('enhance', {
+        description: 'Enhance a prompt for clarity, preview it, then send to the agent',
+        handler: async (args, ctx) => {
+            const text = args.trim();
 
-  // ── Commands ────────────────────────────────────────────────────────
+            if (!text) {
+                if (ctx.hasUI) {
+                    ctx.ui.notify('Usage: /enhance <your prompt>', 'info');
+                }
+                return;
+            }
 
-  pi.registerCommand('enhance', {
-    description: 'Toggle prompt enhancement on/off or show stats',
-    handler: async (args, ctx) => {
-      const sub = args.trim().toLowerCase();
-      
-      if (sub === 'off' || sub === 'disable') {
-        mode = 'off';
-        ctx.ui.notify('🔕 Enhancement OFF', 'info');
-      } else if (sub === 'on' || sub === 'enable' || sub === 'auto') {
-        mode = 'auto';
-        ctx.ui.notify('✨ Enhancement ON - Prompts will be rewritten for clarity', 'success');
-      } else if (sub === 'stats') {
-        ctx.ui.notify(`📊 Enhanced: ${enhanceCount} prompts`, 'info');
-      } else {
-        mode = mode === 'auto' ? 'off' : 'auto';
-        ctx.ui.notify(`Enhancement: ${mode.toUpperCase()}`, 'info');
-      }
-    },
-  });
+            const enhanced = buildEnhancedPrompt(text);
 
-  // ── Event: input - Transform the prompt ─────────────────────────────
+            // TUI / RPC: show the enhanced prompt in an editor for review.
+            // The user can edit it, then submit. Escape cancels.
+            if (ctx.hasUI) {
+                const reviewed = await ctx.ui.editor(
+                    '✨ Enhanced Prompt — edit if needed, then submit',
+                    enhanced,
+                );
 
-  pi.on('input', async (event, ctx) => {
-    if (mode === 'off') return { action: 'continue' };
-    if (event.source === 'extension') return { action: 'continue' };
-    if (shouldSkip(event.text)) return { action: 'continue' };
-    
-    const original = event.text.trim();
-    const enhanced = buildEnhancedPrompt(original);
-    
-    enhanceCount++;
-    
-    if (ctx.hasUI) {
-      ctx.ui.setStatus('enhancer', `Enhanced ×${enhanceCount}`);
-      const preview = original.length > 40 ? original.slice(0, 40) + '...' : original;
-      ctx.ui.notify(`✨ Enhancing: "${preview}"`, 'info');
-    }
-    
-    // KEY: Use 'transform' to replace the user's text
-    // The agent receives the transformed text and processes it normally
-    return { action: 'transform', text: enhanced };
-  });
+                if (reviewed === undefined) {
+                    ctx.ui.notify('Cancelled — prompt not sent', 'info');
+                    return;
+                }
 
-  // ── Event: message_end - Clean up the output ────────────────────────
+                // Send the reviewed (possibly edited) enhanced prompt
+                ctx.sendUserMessage(reviewed);
+            } else {
+                // Print / JSON mode: no editor, send the enhanced version directly
+                ctx.sendUserMessage(enhanced);
+            }
+        },
+    });
 
-  pi.on('message_end', async (event, ctx) => {
-    // When the agent outputs the enhanced prompt in ---ENHANCED--- blocks,
-    // we can optionally clean up the display, but the agent already
-    // executed the enhanced version, so this is just cosmetic
-    if (event.message.role === 'assistant') {
-      // The agent will output the enhanced prompt then execute it.
-      // We leave the output as-is so the user can see the enhancement.
-    }
-  });
-
-  // ── Event: session_start ───────────────────────────────────────────
-
-  pi.on('session_start', async (_event, ctx) => {
-    if (ctx.hasUI) {
-      ctx.ui.setStatus('enhancer', 'Ready');
-      ctx.ui.notify(
-        '✨ Prompt Enhancer loaded. /enhance on|off|stats',
-        'info'
-      );
-    }
-  });
+    // ── session_start: notify that the command is available ─────────────
+    pi.on('session_start', async (_event, ctx) => {
+        if (ctx.hasUI) {
+            ctx.ui.setStatus('enhancer', 'Ready');
+            ctx.ui.notify(
+                '✨ Prompt Enhancer loaded. Use /enhance <prompt> to enhance a message.',
+                'info',
+            );
+        }
+    });
 }
