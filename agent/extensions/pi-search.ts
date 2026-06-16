@@ -15,33 +15,144 @@
  * - fetch_content: URL content extraction
  */
 
-import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
-import { Type } from '@sinclair/typebox';
-// parse will be imported dynamically
+ import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
+import { Type, type Static } from '@sinclair/typebox';
+import { StringEnum } from '@mariozechner/pi-ai';
+import { truncateHead, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from '@mariozechner/pi-coding-agent';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import process from 'node:process';
+import { parse as parseHTML } from 'node-html-parser';
+
+/**
+ * Write content to a temp file and return the path.
+ * Used when tool output is truncated so the LLM can access the full version.
+ */
+function writeTempFile(content: string, prefix = 'pi-search'): string {
+    const tmpDir = os.tmpdir();
+    const fileName = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`;
+    const filePath = path.join(tmpDir, fileName);
+    fs.writeFileSync(filePath, content, 'utf8');
+    return filePath;
+}
+
+/**
+ * Truncate tool output per official pi guidelines:
+ * 50KB / 2000 lines, whichever is hit first.
+ * If truncated, writes the full output to a temp file and informs the LLM.
+ */
+function truncateOutput(output: string, prefix = 'pi-search'): { text: string; truncated: boolean } {
+    const truncation = truncateHead(output, {
+        maxLines: DEFAULT_MAX_LINES,
+        maxBytes: DEFAULT_MAX_BYTES,
+    });
+    let text = truncation.content;
+    if (truncation.truncated) {
+        const tempFile = writeTempFile(output, prefix);
+        text += `\n\n[Output truncated: ${truncation.outputLines} of ${truncation.totalLines} lines`;
+        text += ` (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}).`;
+        text += ` Full output saved to: ${tempFile}]`;
+    }
+    return { text, truncated: truncation.truncated };
+}
+
+/**
+ * Deduplicate results by URL. Preserves first occurrence.
+ */
+function deduplicateResults(results: any[]): any[] {
+    const seen = new Set<string>();
+    return results.filter((r) => {
+        if (!r.url || seen.has(r.url)) return false;
+        seen.add(r.url);
+        return true;
+    });
+}
+
+/**
+ * Filter out low-quality results: empty/very short snippets and
+ * known low-value domains that rarely return useful snippets via SearXNG.
+ */
+const LOW_QUALITY_DOMAINS = [
+    'reddit.com',     // JS-heavy pages, often empty snippets
+    'pinterest.com',
+    'facebook.com',
+    'twitter.com',
+    'x.com',
+    'instagram.com',
+    'tiktok.com',
+];
+function filterLowQualityResults(results: any[]): any[] {
+    return results.filter((r) => {
+        if (!r.snippet || String(r.snippet).trim().length < 20) return false;
+        try {
+            const hostname = new URL(r.url).hostname.replace(/^www\./, '');
+            if (LOW_QUALITY_DOMAINS.some((d) => hostname === d || hostname.endsWith('.' + d))) return false;
+        } catch {
+            // Invalid URL — keep it (better to show than hide)
+        }
+        return true;
+    });
+}
+
+/**
+ * Map depth parameter to effective maxResults when no explicit value is given.
+ * fast = 5, standard = 10, deep = 20.
+ */
+function mapDepthToMaxResults(depth: string | undefined, requested: number | undefined): number {
+    if (requested && requested > 0) return Math.min(requested, 20);
+    switch (depth) {
+        case 'fast': return 5;
+        case 'deep': return 20;
+        case 'standard':
+        default: return 10;
+    }
+}
+
+/**
+ * Format raw search results as Markdown. Used for 'traditional' mode and
+ * as a fallback when AI enhancement fails.
+ */
+function formatRawResults(query: string, results: any[]): string {
+    let text = `## Search Results for "${query}"\n\n`;
+    results.forEach((r: any, i: number) => {
+        text += `${i + 1}. **${r.title}**\n   ${r.url}\n   ${r.snippet}\n\n`;
+    });
+    return text;
+}
+
+ // Tool parameter types
+ interface SearchParams {
+   query: string;
+   mode?: 'auto' | 'traditional' | 'ai' | 'research';
+   maxResults?: number;
+   depth?: 'fast' | 'standard' | 'deep';
+   safeMode?: boolean;
+ }
+
+ interface FetchContentParams {
+   url: string;
+   maxLength?: number;
+   prompt?: string;
+ }
+
+ interface HealthCheckParams {}
 
 // Configuration
 // SearXNG instance URL - must be configured via environment variable or config
 // Set SEARXNG_BASE_URL environment variable to use your own SearXNG instance
 // Example: export SEARXNG_BASE_URL="http://localhost:8081"
 // Or create ~/.pi/agent/search-config.json with {"searxngUrl": "http://localhost:8081"}
-declare const process: any;
 
 function getSearxngUrl(): string {
   // First priority: Environment variable
-  if (typeof process !== 'undefined' && process.env && process.env.SEARXNG_BASE_URL) {
-    const envUrl = process.env.SEARXNG_BASE_URL.trim();
-    if (envUrl) {
-      console.log('[pi-search] Using SearXNG URL from environment: ', envUrl);
-      return envUrl;
-    }
+  const envUrl = process.env.SEARXNG_BASE_URL?.trim();
+  if (envUrl) {
+    return envUrl;
   }
-  
+
   // Second priority: Configuration file
   try {
-    const fs = require('fs');
-    const path = require('path');
-    const os = require('os');
-    
     const configPaths = [
       path.join(os.homedir(), '.pi', 'agent', 'search-config.json'),
       path.join(os.homedir(), '.pi-search-config.json'),
@@ -54,7 +165,6 @@ function getSearxngUrl(): string {
         if (config.searxngUrl && typeof config.searxngUrl === 'string') {
           const fileUrl = config.searxngUrl.trim();
           if (fileUrl) {
-            console.log('[pi-search] Using SearXNG URL from config file: ', fileUrl);
             return fileUrl;
           }
         }
@@ -313,6 +423,7 @@ enum SearchErrorCode {
     INVALID_URL = 'INVALID_URL',
     PARSING_ERROR = 'PARSING_ERROR',
     AI_GENERATION_FAILED = 'AI_GENERATION_FAILED',
+    OPERATION_ABORTED = 'OPERATION_ABORTED',
     UNKNOWN_ERROR = 'UNKNOWN_ERROR'
 }
 
@@ -762,10 +873,10 @@ async function performSearxngSearch(query: string, category = 'general', maxResu
             );
         }
         
-        const data = await response.json();
-        
-        // Format results
-        return data.results?.slice(0, maxResults).map((result: any) => ({
+         const data = await response.json() as any;
+         
+         // Format results
+         return data.results?.slice(0, maxResults).map((result: any) => ({
             title: result.title || 'No title',
             url: result.url || '#',
             snippet: result.content || 'No description',
@@ -787,7 +898,8 @@ async function generateEnhancedAnswer(
         includeCitations?: boolean;
         includeConfidence?: boolean;
         maxSources?: number;
-    } = {}
+    } = {},
+    signal?: AbortSignal
 ): Promise<{
     answer: string;
     confidence: number;
@@ -869,27 +981,27 @@ Please provide a comprehensive answer that:
             
             let aiAnswer: string;
             
-            if (pi?.complete) {
-                const options: any = {
-                    prompt: `${systemPrompt}\n\n${userPrompt}`,
-                    maxTokens: 1500,
-                    temperature: 0.3, // Lower temperature for more factual responses
-                    stopSequences: ['Confidence:']
-                };
-                if (signal) options.signal = signal;
-                const response = await pi.complete(options);
-                aiAnswer = response;
-            } else if (pi?.callLLM) {
-                const options: any = {
-                    messages: [
-                        { role: 'system', content: systemPrompt },
-                        { role: 'user', content: userPrompt }
-                    ]
-                };
-                if (signal) options.signal = signal;
-                const response = await pi.callLLM(options);
-                aiAnswer = typeof response === 'string' ? response : response.content || '';
-            } else {
+             if (pi?.complete) {
+                 const options: any = {
+                     prompt: `${systemPrompt}\n\n${userPrompt}`,
+                     maxTokens: 1500,
+                     temperature: 0.3, // Lower temperature for more factual responses
+                     stopSequences: ['Confidence:']
+                 };
+                 if (signal) options.signal = signal;
+                 const response = await pi.complete(options);
+                 aiAnswer = response;
+             } else if (pi?.callLLM) {
+                 const options: any = {
+                     messages: [
+                         { role: 'system', content: systemPrompt },
+                         { role: 'user', content: userPrompt }
+                     ]
+                 };
+                 if (signal) options.signal = signal;
+                 const response = await pi.callLLM(options);
+                 aiAnswer = typeof response === 'string' ? response : response.content || '';
+             } else {
                 throw new Error('No LLM available');
             }
             
@@ -1378,7 +1490,7 @@ async function unifiedSearch(
     safeMode?: boolean;
   },
   signal?: AbortSignal,
-  piContext: any
+  piContext?: any
 ) {
   const startTime = Date.now();
   
@@ -1507,13 +1619,13 @@ async function unifiedSearch(
         let enhancedAnswer = null;
         let answerConfidence = null;
         
-        if (effectiveMode === 'ai' || effectiveMode === 'research') {
-            // Use enhanced answer generation
-            enhancedAnswer = await generateEnhancedAnswer(query, searchResults, piContext, {
-                includeCitations: true,
-                includeConfidence: true,
-                maxSources: effectiveMode === 'research' ? 5 : 3
-            });
+         if (effectiveMode === 'ai' || effectiveMode === 'research') {
+             // Use enhanced answer generation
+             enhancedAnswer = await generateEnhancedAnswer(query, searchResults, piContext, {
+                 includeCitations: true,
+                 includeConfidence: true,
+                 maxSources: effectiveMode === 'research' ? 5 : 3
+             }, signal);
             
             aiAnswer = enhancedAnswer.answer;
             answerConfidence = enhancedAnswer.confidence;
@@ -1650,151 +1762,117 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         name: 'search',
         label: 'Web Search',
         description: 'Intelligent web search with AI enhancement',
+        promptSnippet: 'Search the web and return synthesized results with sources',
+        promptGuidelines: [
+            'Use search when the user asks a question that requires up-to-date information from the web',
+        ],
         parameters: Type.Object({
             query: Type.String({ description: 'Search query' }),
-            mode: Type.Optional(Type.String({ 
-                description: 'Search mode: auto, traditional, ai, research',
-                enum: ['auto', 'traditional', 'ai', 'research'],
-                default: 'auto'
-            })),
-            maxResults: Type.Optional(Type.Number({ 
-                description: 'Maximum number of results (1-20)',
-                minimum: 1,
-                maximum: 20,
-                default: 10
-            })),
-            depth: Type.Optional(Type.String({ 
-                description: 'Search depth: fast, standard, deep',
-                enum: ['fast', 'standard', 'deep'],
-                default: 'standard'
-            })),
-            safeMode: Type.Optional(Type.Boolean({ 
-                description: 'Enable safe mode to filter sensitive content',
-                default: true
-            }))
+            mode: Type.Optional(StringEnum(['auto', 'traditional', 'ai', 'research'] as const)),
+            maxResults: Type.Optional(Type.Number({ minimum: 1, maximum: 20, default: 10, description: 'Maximum number of results (1-20)' })),
+            depth: Type.Optional(StringEnum(['fast', 'standard', 'deep'] as const)),
+            safeMode: Type.Optional(Type.Boolean({ default: true, description: 'Enable safe mode to filter sensitive content' })),
         }),
-        execute: async (toolCallId: string, params: any, signal: any, onUpdate: any, ctx: any) => {
-            const result = await unifiedSearch(params, signal, ctx);
-            
-            // Format the response for PI
-            let text = '';
-            if (!result.success) {
-                // Handle structured errors
+        execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
+            const searchParams = params as SearchParams;
+            if (!searchParams.query) {
+                throw new Error('Search query is required');
+            }
+            const mode = searchParams.mode ?? 'auto';
+            const category = (searchParams as any).category ?? 'general';
+            const effectiveMax = mapDepthToMaxResults(searchParams.depth, searchParams.maxResults);
+
+            // Verify SearXNG is configured before proceeding
+            try {
+                getSearxngBase();
+            } catch (error) {
+                const message = error instanceof Error ? error.message : 'Configuration required';
+                throw new Error(`[${SearchErrorCode.SEARCH_FAILED}] ${message}`);
+            }
+
+            // Sanitize query
+            let sanitizedQuery: string;
+            try {
+                sanitizedQuery = sanitizeQuery(searchParams.query, SANITIZATION_LEVEL as SanitizationLevel);
+            } catch (error) {
+                const message = error instanceof Error ? error.message : 'Query blocked';
+                throw new Error(`[${SearchErrorCode.QUERY_BLOCKED}] ${message}`);
+            }
+
+            // Perform search
+            let rawResults: any[];
+            try {
+                rawResults = await performSearxngSearch(sanitizedQuery, category, effectiveMax, signal);
+            } catch (error) {
+                const message = error instanceof Error ? error.message : 'Search failed';
+                throw new Error(`[${SearchErrorCode.SEARCH_FAILED}] ${message}`);
+            }
+
+            if (!rawResults || rawResults.length === 0) {
+                throw new Error(`[${SearchErrorCode.NO_RESULTS}] No results found for: ${sanitizedQuery}`);
+            }
+
+            // Post-processing pipeline: dedup → quality filter
+            const deduped = deduplicateResults(rawResults);
+            const filtered = filterLowQualityResults(deduped);
+            // If filter removes everything, fall back to deduped (better than no results)
+            const results = filtered.length > 0 ? filtered : deduped;
+
+            // Format based on mode
+            let text: string;
+            let usedAI = false;
+            if (mode === 'ai' || mode === 'auto' || mode === 'research') {
+                // AI-enhanced answer with citations
                 try {
-                    const error = result.error as any;
-                    if (error && typeof error === 'object' && error.code) {
-                        text = `**Search Error (${error.code})**\n\n${error.message || 'Unknown error'}`;
-                        if (error.details && Object.keys(error.details).length > 0) {
-                            text += `\n\n**Details:** ${JSON.stringify(error.details, null, 2)}`;
-                        }
-                        if (error.retryable) {
-                            text += '\n\n**Note:** This error is retryable.';
-                        }
-                    } else {
-                        text = `**Search Error**\n\n${result.error || 'Unknown error'}`;
+                    const enhanced = await generateEnhancedAnswer(
+                        sanitizedQuery,
+                        results,
+                        pi,
+                        {
+                            includeCitations: true,
+                            includeConfidence: mode === 'research',
+                            maxSources: mode === 'research' ? 10 : 5,
+                        },
+                        signal,
+                    );
+                    usedAI = true;
+                    text = `## ${enhanced.answer}\n\n`;
+                    if (enhanced.sources && enhanced.sources.length > 0) {
+                        text += `### Sources\n`;
+                        enhanced.sources.forEach((s: any, i: number) => {
+                            text += `${i + 1}. [${s.title}](${s.url}) (credibility: ${(s.credibility * 100).toFixed(0)}%)\n`;
+                        });
                     }
-                } catch (e) {
-                    text = `**Search Error**\n\n${typeof result.error === 'string' ? result.error : 'Unknown error'}`;
+                    if (mode === 'research' && typeof enhanced.confidence === 'number') {
+                        text += `\n*Confidence: ${(enhanced.confidence * 100).toFixed(0)}%*\n`;
+                    }
+                } catch (error) {
+                    // Fall back to raw results if AI enhancement fails
+                    text = formatRawResults(searchParams.query, results);
                 }
             } else {
-                text = `## 🔍 Enhanced Search Results\n\n`;
-                text += `**Query:** ${result.query}\n`;
-                
-                // OPTIMIZATION: Show query analysis
-                if (result.query_analysis) {
-                    text += `**Search Strategy:** ${result.query_analysis.searchStrategy}\n`;
-                    if (result.query_analysis.focusAreas.length > 0) {
-                        text += `**Focus Areas:** ${result.query_analysis.focusAreas.join(', ')}\n`;
-                    }
-                }
-                
-                text += `**Mode:** ${result.mode_used}\n`;
-                text += `**Total Results:** ${result.results_count}\n`;
-                
-                // OPTIMIZATION: Show credibility stats
-                if (result.credible_results_count !== undefined) {
-                    text += `**Credible Results:** ${result.credible_results_count} (${Math.round((result.credible_results_count / result.results_count) * 100)}%)\n`;
-                }
-                
-                text += `**Processing Time:** ${result.processing_time_ms}ms\n`;
-                
-                // OPTIMIZATION: Show confidence score for AI answers
-                if (result.answer_confidence !== null && result.answer_confidence !== undefined) {
-                    const confidencePercent = Math.round(result.answer_confidence * 100);
-                    let confidenceEmoji = '🟡';
-                    if (confidencePercent >= 80) confidenceEmoji = '🟢';
-                    if (confidencePercent <= 60) confidenceEmoji = '🔴';
-                    text += `**Answer Confidence:** ${confidenceEmoji} ${confidencePercent}%\n`;
-                }
-                
-                if (result.cached) {
-                    text += `**Note:** Served from cache\n`;
-                }
-                
-                if (result.ai_answer) {
-                    text += `\n---\n\n### 🤖 AI Answer\n\n${result.ai_answer}\n`;
-                }
-                
-                // OPTIMIZATION: Show enhanced answer details if available
-                if (result.enhanced_answer?.sources) {
-                    text += `\n**Sources Used:** ${result.enhanced_answer.sources.length} credible sources\n`;
-                }
-                
-                if (result.results && result.results.length > 0) {
-                    text += `\n---\n\n### 📊 Top Results (with Credibility Scores)\n\n`;
-                    result.results.slice(0, 3).forEach((r: any, i: number) => {
-                        const credibility = r.credibility || calculateCredibility(r);
-                        const credibilityPercent = Math.round(credibility.score * 100);
-                        let credibilityBadge = '🟡';
-                        if (credibilityPercent >= 80) credibilityBadge = '🟢';
-                        if (credibilityPercent <= 60) credibilityBadge = '🔴';
-                        
-                        text += `${i + 1}. ${credibilityBadge} **${r.title}**\n`;
-                        text += `   Credibility: ${credibilityPercent}% (${credibility.level})\n`;
-                        text += `   ${r.snippet.substring(0, 120)}...\n`;
-                        text += `   ${r.url}\n\n`;
-                    });
-                }
-                
-                // OPTIMIZATION: Show structured content info if available
-                if (result.structured_content) {
-                    text += `\n---\n\n### 📄 Structured Content Analysis\n\n`;
-                    text += `**Content Type:** ${result.structured_content.contentType}\n`;
-                    text += `**Headings Found:** ${result.structured_content.structured.headings.length}\n`;
-                    text += `**Key Points:** ${result.structured_content.structured.keyPoints.length}\n`;
-                    if (result.structured_content.structured.metadata.readingTime) {
-                        text += `**Reading Time:** ${result.structured_content.structured.metadata.readingTime}\n`;
-                    }
-                }
+                // Traditional mode: raw results only
+                text = formatRawResults(searchParams.query, results);
             }
-            
+
+            // Truncate output per official pi guidelines (50KB / 2000 lines)
+            const { text: finalText, truncated } = truncateOutput(text, 'pi-search-results');
+
             return {
-                content: [{ type: 'text', text }],
-                details: result,
-                isError: !result.success
-            };
-        }
-    });
-    
-    // Register health check tool
-    pi.registerTool({
-        name: 'search_health',
-        label: 'Search Health',
-        description: 'Check search system health and statistics',
-        parameters: Type.Object({}),
-        execute: async (toolCallId: string, params: any, signal: any, onUpdate: any, ctx: any) => {
-            const health = searchHealth();
-            let text = `## Search System Health\n\n`;
-            text += `**Status:** ${health.status}\n`;
-            text += `**SearXNG URL:** ${health.searxng_url}\n`;
-            text += `**Cache Size:** ${health.cache.size} entries\n`;
-            text += `**Rate Limit Recent Requests:** ${health.rate_limiting.recent_requests}\n`;
-            text += `**Timestamp:** ${health.timestamp}\n`;
-            
-            return {
-                content: [{ type: 'text', text }],
-                details: health,
-                isError: false
+                content: [{ type: 'text', text: finalText }],
+                details: {
+                    query: searchParams.query,
+                    mode,
+                    category,
+                    depth: searchParams.depth,
+                    rawCount: rawResults.length,
+                    afterDedup: deduped.length,
+                    afterFilter: filtered.length,
+                    resultCount: results.length,
+                    usedAI,
+                    results,
+                    truncated,
+                },
             };
         }
     });
@@ -1804,6 +1882,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
         name: 'fetch_content',
         label: 'Fetch Content',
         description: 'Fetch and extract content from a URL',
+        promptSnippet: 'Fetch and extract structured content from a URL',
+        promptGuidelines: [
+            'Use fetch_content to retrieve and parse web page content',
+        ],
         parameters: Type.Object({
             url: Type.String({ description: 'URL to fetch' }),
             maxLength: Type.Optional(Type.Number({ 
@@ -1814,16 +1896,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
                 description: 'Optional prompt to focus extraction'
             }))
         }),
-        execute: async (toolCallId: string, params: any, signal: any, onUpdate: any, ctx: any) => {
+        execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
+            const fetchParams = params as FetchContentParams;
             try {
                 // Handle maxLength parameter safely
                 let maxLengthValue = 2000;
-                if (params && params.maxLength !== undefined && params.maxLength !== null) {
+                if (fetchParams && fetchParams.maxLength !== undefined && fetchParams.maxLength !== null) {
                     // Convert to number if it's a string
-                    if (typeof params.maxLength === 'string') {
-                        maxLengthValue = parseInt(params.maxLength, 10) || 2000;
-                    } else if (typeof params.maxLength === 'number') {
-                        maxLengthValue = params.maxLength;
+                    if (typeof fetchParams.maxLength === 'string') {
+                        maxLengthValue = parseInt(fetchParams.maxLength, 10) || 2000;
+                    } else if (typeof fetchParams.maxLength === 'number') {
+                        maxLengthValue = fetchParams.maxLength;
                     }
                     // Ensure it's a positive number
                     if (maxLengthValue <= 0 || !Number.isFinite(maxLengthValue)) {
@@ -1833,9 +1916,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
                 
                 // OPTIMIZATION: Use enhanced structured content extraction
                 const content = await fetchStructuredContent(
-                    params.url, 
+                    fetchParams.url, 
                     maxLengthValue,
-                    params.prompt,
+                    fetchParams.prompt,
                     signal
                 );
                 
@@ -1875,12 +1958,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
                 // Show content preview
                 text += `### 📝 Content Preview\n\n`;
                 
-                if (params.prompt) {
-                    text += `*(Focused on: "${params.prompt}")*\n\n`;
+                if (fetchParams.prompt) {
+                    text += `*(Focused on: "${fetchParams.prompt}")*\n\n`;
                 }
                 
                 // Show either beginning or focused content
-                if (params.prompt && content.content.length > 0) {
+                if (fetchParams.prompt && content.content.length > 0) {
                     // Show focused preview
                     text += `${content.content.substring(0, 600)}${content.content.length > 600 ? '...' : ''}`;
                 } else {
@@ -1900,8 +1983,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
                 }
                 
                 // Return with proper structure for pi tool API
+                // Truncate output per official pi guidelines (50KB / 2000 lines)
+                const { text: finalText, truncated } = truncateOutput(text, 'pi-search-content');
                 return {
-                    content: [{ type: 'text', text }],
+                    content: [{ type: 'text', text: finalText }],
                     details: { 
                         success: true, 
                         content: {
@@ -1913,9 +1998,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
                             // Include structured data in a way that preserves compatibility
                             _structured: content.structured,
                             _contentType: content.contentType
-                        }
+                        },
+                        truncated
                     },
-                    isError: false
                 };
             } catch (error) {
                 // Handle structured errors
@@ -1936,16 +2021,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
                     errorMessage = error.message;
                 }
                 
-                let text = `**Fetch Content Error**\n\nFailed to fetch content: ${errorMessage}`;
-                
-                return {
-                    content: [{ type: 'text', text }],
-                    details: { 
-                        success: false,
-                        error: createError(errorCode, errorMessage, { url: params.url }, retryable)
-                    },
-                    isError: true
-                };
+                throw new Error(`[${errorCode}] ${errorMessage}`);
             }
         }
     });
